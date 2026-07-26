@@ -145,18 +145,13 @@ Extra command paths:
 
 ## Install
 
-UltraWork is published on npm as [`pi-ultrawork`](https://www.npmjs.com/package/pi-ultrawork). Add it to the `extensions` array in `~/.pi/agent/settings.json` using the `npm:` prefix, then restart / `reload` pi:
+UltraWork is published on npm as [`pi-ultrawork`](https://www.npmjs.com/package/pi-ultrawork). Install it in pi with the npm package locator:
 
-```jsonc
-// ~/.pi/agent/settings.json
-{
-  "extensions": [
-    "npm:pi-ultrawork"
-  ]
-}
+```bash
+pi install npm:pi-ultrawork
 ```
 
-That's the whole install — pi resolves and loads the published package the same way it loads its built-ins. No build step: pi transpiles the TypeScript entry on load.
+Then restart / `reload` pi. That's the whole install — pi resolves and loads the published package the same way it loads its built-ins. No build step: pi transpiles the TypeScript entry on load.
 
 <details>
 <summary>Working on the extension itself?</summary>
@@ -180,7 +175,7 @@ pi -e ./src/index.ts
 
 ## Usage
 
-```
+```bash
 ultrawork implement dark mode across the settings screens
 ```
 
@@ -235,13 +230,13 @@ pnpm publish --access public       # 4. publish
 
 > Note: `npm login` also trips over `devEngines` inside the repo — run it from your home dir (`cd ~ && npm login`); the token is global.
 
-Then anyone adds it to their `~/.pi/agent/settings.json`:
+Then anyone installs it with pi:
 
-```jsonc
-{ "extensions": ["npm:pi-ultrawork"] }
+```bash
+pi install npm:pi-ultrawork
 ```
 
-and `reload`. That `npm:<package-name>` form is exactly how pi resolves published extensions — the same mechanism as the built-ins.
+That `pi install npm:<package-name>` form is exactly how pi resolves published extensions — the same mechanism as the built-ins.
 
 ## Inspiration
 
