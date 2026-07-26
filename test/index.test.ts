@@ -24,12 +24,15 @@ import {
 } from "../src/ultrawork/dispatch.js";
 import {
 	buildContinuationPrompt,
+	buildReinjectDirective,
 	buildUltraworkDirective,
 } from "../src/ultrawork/prompt.js";
 import {
+	isAlwaysOn,
 	isTriggerDisabled,
 	readRun,
 	recordAutoContinueAttempt,
+	setAlwaysOn,
 	stopRun,
 	triggerRun,
 	ultraworkStoreRef,
@@ -77,11 +80,12 @@ describe("index extension wiring", () => {
 		expect(typeof commands.get("ulw")?.handler).toBe("function");
 	});
 
-	it("registers before_agent_start, session_start, agent_start, agent_end, agent_settled, and session_shutdown handlers", () => {
+	it("registers before_agent_start, session_start, session_compact, agent_start, agent_end, agent_settled, and session_shutdown handlers", () => {
 		const { api, handlers } = createFakeApi();
 		extension(api);
 		expect(handlers.has("before_agent_start")).toBe(true);
 		expect(handlers.has("session_start")).toBe(true);
+		expect(handlers.has("session_compact")).toBe(true);
 		expect(handlers.has("agent_start")).toBe(true);
 		expect(handlers.has("agent_end")).toBe(true);
 		expect(handlers.has("agent_settled")).toBe(true);
@@ -373,6 +377,108 @@ describe("before_agent_start trigger detection", () => {
 		expect(notifications.at(-1)).toMatchObject({ type: "error" });
 		expect(notifications.at(-1)?.message).toContain("too long");
 		expect(await readRun(ref)).toBeNull();
+	});
+});
+
+describe("always-on mode (integration)", () => {
+	it("a no-keyword prompt starts a run with the prompt as goal when always-on is set", async () => {
+		const { api, handlers, commands } = createFakeApi();
+		extension(api);
+		const { ctx, ref } = await createFakeCtx();
+
+		await commands.get("ulw")?.handler("always on", ctx);
+		expect(await isAlwaysOn(ref)).toBe(true);
+
+		const result = await handlers.get("before_agent_start")?.(
+			{ type: "before_agent_start", prompt: "refactor the auth module" },
+			ctx,
+		);
+		const run = await readRun(ref);
+		expect(run?.status).toBe("running");
+		expect(run?.goal).toBe("refactor the auth module");
+		expect(result?.message?.customType).toBe(ULTRAWORK_DIRECTIVE_MESSAGE_TYPE);
+	});
+
+	it("`/ulw always off` reverts triggering but does not stop the running run", async () => {
+		const { api, commands } = createFakeApi();
+		extension(api);
+		const { ctx, ref } = await createFakeCtx();
+		await triggerRun(ref, "ultrawork keep running");
+		await setAlwaysOn(ref, true);
+
+		await commands.get("ulw")?.handler("always off", ctx);
+		expect(await isAlwaysOn(ref)).toBe(false);
+		expect((await readRun(ref))?.status).toBe("running");
+	});
+
+	it("`/ulw off` clears always-on (mutually exclusive)", async () => {
+		const { api, commands } = createFakeApi();
+		extension(api);
+		const { ctx, ref } = await createFakeCtx();
+		await setAlwaysOn(ref, true);
+
+		await commands.get("ulw")?.handler("off", ctx);
+		expect(await isAlwaysOn(ref)).toBe(false);
+		expect(await isTriggerDisabled(ref)).toBe(true);
+	});
+});
+
+describe("session_compact reinjection (integration)", () => {
+	it("flags a running run on compaction, then before_agent_start reinjects exactly once", async () => {
+		const { api, handlers } = createFakeApi();
+		extension(api);
+		const { ctx, ref } = await createFakeCtx();
+		await triggerRun(ref, "ultrawork build the thing");
+
+		await handlers.get("session_compact")?.({ type: "session_compact" }, ctx);
+
+		const result = await handlers.get("before_agent_start")?.(
+			{ type: "before_agent_start", prompt: "ok continue" },
+			ctx,
+		);
+		const run = await readRun(ref);
+		expect(result?.message?.content).toBe(
+			buildReinjectDirective(run as UltraWorkRun),
+		);
+
+		const second = await handlers.get("before_agent_start")?.(
+			{ type: "before_agent_start", prompt: "still going" },
+			ctx,
+		);
+		expect(second).toBeUndefined();
+	});
+
+	it("does nothing when there is no running run", async () => {
+		const { api, handlers } = createFakeApi();
+		extension(api);
+		const { ctx, ref } = await createFakeCtx();
+		await handlers.get("session_compact")?.({ type: "session_compact" }, ctx);
+		expect(await readRun(ref)).toBeNull();
+	});
+});
+
+describe("steer command (integration)", () => {
+	it("queues a steer on a running run", async () => {
+		const { api, commands } = createFakeApi();
+		extension(api);
+		const { ctx, ref, notifications } = await createFakeCtx();
+		await triggerRun(ref, "ultrawork ship it");
+
+		await commands
+			.get("ulw")
+			?.handler("steer use the Repository pattern", ctx);
+		expect((await readRun(ref))?.pendingSteers).toEqual([
+			"use the Repository pattern",
+		]);
+		expect(notifications.at(-1)?.message).toContain("Steer queued");
+	});
+
+	it("warns when there is no running run to steer", async () => {
+		const { api, commands } = createFakeApi();
+		extension(api);
+		const { ctx, notifications } = await createFakeCtx();
+		await commands.get("ulw")?.handler("steer focus on tests", ctx);
+		expect(notifications.at(-1)).toMatchObject({ type: "warning" });
 	});
 });
 

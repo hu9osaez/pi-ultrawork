@@ -25,6 +25,41 @@ describe("ultrawork command parsing", () => {
 		expect(parseUltraworkCommand("On")).toEqual({ kind: "on" });
 	});
 
+	it("parses the always on/off subcommand, case-insensitively", () => {
+		expect(parseUltraworkCommand("always on")).toEqual({ kind: "always-on" });
+		expect(parseUltraworkCommand("ALWAYS ON")).toEqual({ kind: "always-on" });
+		expect(parseUltraworkCommand("always   off")).toEqual({
+			kind: "always-off",
+		});
+		expect(parseUltraworkCommand("always")).toEqual({
+			kind: "unknown",
+			input: "always",
+		});
+		expect(parseUltraworkCommand("always sideways")).toEqual({
+			kind: "unknown",
+			input: "always sideways",
+		});
+	});
+
+	it("parses steer and preserves the raw text verbatim (case + spacing)", () => {
+		expect(
+			parseUltraworkCommand("steer Use the Repository pattern for DB access"),
+		).toEqual({
+			kind: "steer",
+			text: "Use the Repository pattern for DB access",
+		});
+		expect(
+			parseUltraworkCommand("STEER Keep the API BACKWARD compatible"),
+		).toEqual({
+			kind: "steer",
+			text: "Keep the API BACKWARD compatible",
+		});
+		expect(parseUltraworkCommand("steer")).toEqual({
+			kind: "unknown",
+			input: "steer",
+		});
+	});
+
 	it("treats unrecognized verbs as unknown, including the retired start/resume verbs", () => {
 		expect(parseUltraworkCommand("start ship the release")).toEqual({
 			kind: "unknown",

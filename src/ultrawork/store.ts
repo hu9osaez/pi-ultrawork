@@ -107,9 +107,12 @@ async function writeStore(
 ): Promise<void> {
 	const filePath = runFilePath(ref);
 	await mkdir(dirname(filePath), { recursive: true });
-	// Normalize: drop `triggerDisabled` when falsy so the enabled state has no key.
+	// Normalize: drop falsy file-level flags so the default state has no keys.
+	// Every persisted file-level flag MUST be re-added here or it silently vanishes
+	// on the next unrelated write (see the all-fields-preserved regression test).
 	const normalized: UltraWorkFile = { version: STORE_VERSION, run: file.run };
 	if (file.triggerDisabled) normalized.triggerDisabled = true;
+	if (file.alwaysOn) normalized.alwaysOn = true;
 	await writeFile(filePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
 }
 
@@ -135,13 +138,42 @@ export async function isTriggerDisabled(
 	return (await readStore(ref)).triggerDisabled === true;
 }
 
-/** Set (or clear) the keyword-trigger kill switch, preserving any existing run. */
+/**
+ * Set (or clear) the keyword-trigger kill switch, preserving any existing run.
+ * Mutually exclusive with always-on: disabling the trigger also clears alwaysOn,
+ * since "never trigger" and "always trigger" cannot both hold.
+ */
 export async function setTriggerDisabled(
 	ref: UltraWorkStoreRef,
 	disabled: boolean,
 ): Promise<void> {
 	const existing = await readStore(ref);
-	await writeStore(ref, { ...existing, triggerDisabled: disabled });
+	await writeStore(ref, {
+		...existing,
+		triggerDisabled: disabled,
+		...(disabled ? { alwaysOn: false } : {}),
+	});
+}
+
+/** True when every prompt should start/refresh an UltraWork run for this thread. */
+export async function isAlwaysOn(ref: UltraWorkStoreRef): Promise<boolean> {
+	return (await readStore(ref)).alwaysOn === true;
+}
+
+/**
+ * Set (or clear) always-on mode, preserving any existing run. Mutually exclusive
+ * with the kill switch: enabling always-on also clears triggerDisabled.
+ */
+export async function setAlwaysOn(
+	ref: UltraWorkStoreRef,
+	on: boolean,
+): Promise<void> {
+	const existing = await readStore(ref);
+	await writeStore(ref, {
+		...existing,
+		alwaysOn: on,
+		...(on ? { triggerDisabled: false } : {}),
+	});
 }
 
 /**
@@ -291,6 +323,65 @@ export async function recordDispatch(
 	});
 }
 
+/**
+ * Flag the running run so the full UltraWork directive gets re-injected on the
+ * next `before_agent_start` (the post-compaction bridge). No-ops if no run.
+ */
+export async function setPendingReinject(
+	ref: UltraWorkStoreRef,
+): Promise<UltraWorkRun | null> {
+	const current = await readRun(ref);
+	if (current === null) return null;
+	return transitionRun(ref, current, {
+		isNoop: (run) => run.pendingReinject === true,
+		patch: () => ({ pendingReinject: true }),
+	});
+}
+
+/**
+ * Atomically read-and-clear the pending-reinject flag. Returns true when it was
+ * set (caller should then re-inject the directive). Returns false with no write
+ * when unset or when there is no run.
+ */
+export async function consumePendingReinject(
+	ref: UltraWorkStoreRef,
+): Promise<boolean> {
+	const current = await readRun(ref);
+	if (current === null || current.pendingReinject !== true) return false;
+	await transitionRun(ref, current, {
+		patch: () => ({ pendingReinject: false }),
+	});
+	return true;
+}
+
+/** Append a mid-run steering note (`/ulw steer <text>`). No-ops if no run or blank note. */
+export async function addSteer(
+	ref: UltraWorkStoreRef,
+	note: string,
+): Promise<UltraWorkRun | null> {
+	const trimmed = note.trim();
+	const current = await readRun(ref);
+	if (current === null || trimmed === "") return current;
+	return transitionRun(ref, current, {
+		patch: (run) => ({
+			pendingSteers: [...(run.pendingSteers ?? []), trimmed],
+		}),
+	});
+}
+
+/**
+ * Atomically read-and-clear the queued steering notes so each is consumed
+ * exactly once. Returns them (possibly empty). No write when there are none.
+ */
+export async function consumeSteers(ref: UltraWorkStoreRef): Promise<string[]> {
+	const current = await readRun(ref);
+	if (current === null) return [];
+	const steers = current.pendingSteers ?? [];
+	if (steers.length === 0) return [];
+	await transitionRun(ref, current, { patch: () => ({ pendingSteers: [] }) });
+	return steers;
+}
+
 function parseUltraWorkFile(raw: string): UltraWorkFile {
 	let parsed: unknown;
 	try {
@@ -322,8 +413,15 @@ function parseUltraWorkFile(raw: string): UltraWorkFile {
 			"ultrawork store triggerDisabled must be a boolean",
 		);
 	}
+	const alwaysOn = parsed["alwaysOn"];
+	if (alwaysOn !== undefined && typeof alwaysOn !== "boolean") {
+		throw new InvalidUltraWorkStoreError(
+			"ultrawork store alwaysOn must be a boolean",
+		);
+	}
 	const file: UltraWorkFile = { version: STORE_VERSION, run };
 	if (triggerDisabled === true) file.triggerDisabled = true;
+	if (alwaysOn === true) file.alwaysOn = true;
 	return file;
 }
 
@@ -357,7 +455,12 @@ function isUltraWorkRun(value: unknown): value is UltraWorkRun {
 			isNonNegativeSafeInteger(value["stuckAt"])) &&
 		(value["lastDispatchAt"] === undefined ||
 			isNonNegativeSafeInteger(value["lastDispatchAt"])) &&
-		(value["summary"] === undefined || typeof value["summary"] === "string")
+		(value["summary"] === undefined || typeof value["summary"] === "string") &&
+		(value["pendingReinject"] === undefined ||
+			typeof value["pendingReinject"] === "boolean") &&
+		(value["pendingSteers"] === undefined ||
+			(Array.isArray(value["pendingSteers"]) &&
+				value["pendingSteers"].every((s) => typeof s === "string")))
 	);
 }
 

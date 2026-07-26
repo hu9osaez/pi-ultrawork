@@ -6,7 +6,13 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
 	completeRun,
+	addSteer,
+	consumePendingReinject,
+	consumeSteers,
+	isAlwaysOn,
 	isTriggerDisabled,
+	setAlwaysOn,
+	setPendingReinject,
 	markRunStuck,
 	readRun,
 	recordAutoContinueAttempt,
@@ -331,6 +337,80 @@ describe("ultrawork store", () => {
 			expect(await readRun(ref)).toMatchObject({
 				goal: "ultrawork keep the flag",
 				status: "running",
+			});
+		});
+	});
+
+	describe("alwaysOn flag", () => {
+		it("defaults to off and round-trips", async () => {
+			const ref = await tempStore("thread-always-toggle");
+			expect(await isAlwaysOn(ref)).toBe(false);
+			await setAlwaysOn(ref, true);
+			expect(await isAlwaysOn(ref)).toBe(true);
+			await setAlwaysOn(ref, false);
+			expect(await isAlwaysOn(ref)).toBe(false);
+		});
+
+		it("is mutually exclusive with triggerDisabled: each setter clears the other", async () => {
+			const ref = await tempStore("thread-mutex");
+			await setTriggerDisabled(ref, true);
+			await setAlwaysOn(ref, true);
+			expect(await isAlwaysOn(ref)).toBe(true);
+			expect(await isTriggerDisabled(ref)).toBe(false);
+			await setTriggerDisabled(ref, true);
+			expect(await isTriggerDisabled(ref)).toBe(true);
+			expect(await isAlwaysOn(ref)).toBe(false);
+		});
+	});
+
+	describe("pendingReinject flag", () => {
+		it("set then consume returns true once, then false", async () => {
+			const ref = await tempStore("thread-reinject");
+			await triggerRun(ref, "ultrawork goal");
+			await setPendingReinject(ref);
+			expect(await consumePendingReinject(ref)).toBe(true);
+			expect(await consumePendingReinject(ref)).toBe(false);
+		});
+
+		it("no-ops (false) when there is no run", async () => {
+			const ref = await tempStore("thread-reinject-norun");
+			expect(await setPendingReinject(ref)).toBeNull();
+			expect(await consumePendingReinject(ref)).toBe(false);
+		});
+	});
+
+	describe("pendingSteers queue", () => {
+		it("appends and consumes steers exactly once, preserving order and case", async () => {
+			const ref = await tempStore("thread-steer");
+			await triggerRun(ref, "ultrawork goal");
+			await addSteer(ref, "Use TypeScript strict mode");
+			await addSteer(ref, "Focus on the auth module");
+			expect(await consumeSteers(ref)).toEqual([
+				"Use TypeScript strict mode",
+				"Focus on the auth module",
+			]);
+			expect(await consumeSteers(ref)).toEqual([]);
+		});
+
+		it("ignores a blank steer and no-ops without a run", async () => {
+			const ref = await tempStore("thread-steer-edge");
+			expect(await addSteer(ref, "anything")).toBeNull();
+			await triggerRun(ref, "ultrawork goal");
+			await addSteer(ref, "   ");
+			expect(await consumeSteers(ref)).toEqual([]);
+		});
+	});
+
+	describe("all file-level fields preserved together", () => {
+		it("a run write does not drop alwaysOn (writeStore preserves every flag)", async () => {
+			const ref = await tempStore("thread-preserve-all");
+			await setAlwaysOn(ref, true);
+			// An unrelated run write must not clobber the file-level alwaysOn flag.
+			await triggerRun(ref, "ultrawork keep everything");
+			await addSteer(ref, "steer note");
+			expect(await isAlwaysOn(ref)).toBe(true);
+			expect(await readRun(ref)).toMatchObject({
+				pendingSteers: ["steer note"],
 			});
 		});
 	});

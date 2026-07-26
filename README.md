@@ -9,14 +9,16 @@ The idea in one line: **the goal lives on disk, not in the chat context — so t
 ## What it does
 
 - **Trigger** — say `ultrawork` or `ulw` (as a whole word) anywhere in a message to start or re-engage the mode. No command needed.
-- **Persistent goal** — one run per session, stored as a JSON file on disk (`running` / `complete` / `stopped` / `stuck`). Because it lives outside the LLM context, it survives compaction: every turn re-reads the goal and keeps going.
+- **Persistent goal** — one run per session, stored as a JSON file on disk (`running` / `complete` / `stopped` / `stuck`). Because it lives outside the LLM context, it survives compaction — and a `session_compact` hook actively re-injects the mode framing on the next turn so the agent never loses the thread.
+- **Always-on mode** — `/ulw always on` runs *every* message in UltraWork, no keyword needed; `/ulw always off` reverts.
+- **Mid-run steering** — `/ulw steer <text>` injects an extra instruction into a running run (consumed on the next continuation) without restarting the flow.
 - **Footer status** — always visible while a run exists:
   - `● UltraWork running — <goal…> (started Nm ago)` (goal truncated so it never floods the bar)
   - `UltraWork complete`
   - `UltraWork stopped (say "ultrawork" to start again)`
   - `UltraWork stuck after 2 idle retries — say "ultrawork" again to restart`
 - **Auto-continuation** — while running, pi queues a hidden follow-up once each turn settles, nudging the agent forward. Capped at **2** unproductive attempts (reset by any completed `ulw_dispatch`) before the run is marked stuck instead of looping forever.
-- **`ulw_dispatch` tool** — fans independent sub-tasks out to child `pi` processes (parallel with a concurrency cap, or sequential) and folds the results back in. A depth-guard (`MAX_DISPATCH_DEPTH = 1`) stops dispatched children from spawning their own children.
+- **`ulw_dispatch` tool** — fans independent sub-tasks out to child `pi` processes (parallel with a concurrency cap, or sequential) and folds the results back in. Each child's live activity (thinking / tool calls / web search) streams into the chat as it happens, so a dispatch is no longer a black box. A depth-guard (`MAX_DISPATCH_DEPTH = 1`) stops dispatched children from spawning their own children.
 - **`ulw_complete` tool** — the model calls this once the goal is genuinely achieved; it ends the run and disarms auto-continuation. It's the only success exit — the agent can't just declare victory in prose.
 
 ## Install
@@ -65,14 +67,17 @@ That's it — no command. The mode starts, works autonomously across turns (fann
 ## Commands
 
 ```bash
-/ulw          # show the current run (same as /ulw status)
-/ulw status   # show the current run
-/ulw stop     # stop the run; auto-continuation stops too
-/ulw off      # mute the keyword trigger — "ultrawork"/"ulw" stop activating the mode
-/ulw on       # re-arm the keyword trigger
+/ulw               # show the current run (same as /ulw status)
+/ulw status        # show the current run
+/ulw stop          # stop the run; auto-continuation stops too
+/ulw off           # mute the keyword trigger — "ultrawork"/"ulw" stop activating the mode
+/ulw on            # re-arm the keyword trigger
+/ulw always on     # run EVERY message in UltraWork, no keyword needed
+/ulw always off    # revert to keyword-only triggering
+/ulw steer <text>  # inject a mid-run instruction, applied on the next continuation
 ```
 
-`/ulw off` is what you want while **developing this extension** (or any repo where you type "ulw" a lot): it lets you say the trigger words freely without starting a run. The setting persists per session until you `/ulw on`.
+`/ulw off` is what you want while **developing this extension** (or any repo where you type "ulw" a lot): it lets you say the trigger words freely without starting a run. `off` and `always on` are mutually exclusive — each clears the other. `/ulw always off` reverts triggering but never stops an in-flight run (that's `/ulw stop`). `/ulw steer` needs a running run; the note rides the next continuation turn exactly once.
 
 ## Agent tools
 

@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+	activityFromChildEvent,
 	currentDispatchDepth,
 	DEFAULT_TASK_TIMEOUT_MS,
+	dispatchTaskLabel,
 	getFinalOutput,
 	getPiInvocation,
 	mapWithConcurrencyLimit,
@@ -632,5 +634,84 @@ describe("runDispatchTask", () => {
 
 		const result = await promise;
 		expect(result.output).toBe("(no output)");
+	});
+});
+
+describe("activityFromChildEvent", () => {
+	it("maps tool_execution_start to the tool name", () => {
+		expect(
+			activityFromChildEvent({
+				type: "tool_execution_start",
+				toolName: "web_search",
+			}),
+		).toBe("web_search");
+	});
+
+	it("maps message_start/turn_start/tool_execution_end to friendly labels", () => {
+		expect(activityFromChildEvent({ type: "message_start" })).toBe(
+			"responding…",
+		);
+		expect(activityFromChildEvent({ type: "turn_start" })).toBe("thinking…");
+		expect(activityFromChildEvent({ type: "tool_execution_end" })).toBe(
+			"working…",
+		);
+	});
+
+	it("returns undefined for unrelated or malformed events", () => {
+		expect(activityFromChildEvent({ type: "message_end" })).toBeUndefined();
+		expect(activityFromChildEvent({ type: "tool_execution_start" })).toBe(
+			"using a tool",
+		);
+		expect(activityFromChildEvent(null)).toBeUndefined();
+		expect(activityFromChildEvent("nope")).toBeUndefined();
+	});
+});
+
+describe("dispatchTaskLabel", () => {
+	it("collapses whitespace and truncates long task text", () => {
+		expect(dispatchTaskLabel("do   the\n thing")).toBe("do the thing");
+		const long = "x".repeat(100);
+		const label = dispatchTaskLabel(long);
+		expect(label.endsWith("…")).toBe(true);
+		expect(label.length).toBe(60);
+	});
+});
+
+describe("runDispatchTask activity streaming", () => {
+	class FakeChildProcess extends EventEmitter {
+		stdout = new EventEmitter();
+		stderr = new EventEmitter();
+		killed = false;
+		kill = vi.fn((_signal?: string) => true);
+	}
+
+	afterEach(() => {
+		vi.mocked(spawn).mockReset();
+	});
+
+	it("reports the child's tool activity through onProgress before it finishes", async () => {
+		const proc = new FakeChildProcess();
+		vi.mocked(spawn).mockReturnValue(proc as unknown as ChildProcess);
+
+		const activities: Array<string | undefined> = [];
+		const promise = runDispatchTask({
+			defaultCwd: "/work",
+			index: 0,
+			task: "research something",
+			cwd: undefined,
+			signal: undefined,
+			onProgress: (activity) => activities.push(activity),
+		});
+
+		proc.stdout.emit(
+			"data",
+			Buffer.from(
+				`${JSON.stringify({ type: "tool_execution_start", toolName: "web_search" })}\n`,
+			),
+		);
+		proc.emit("close", 0);
+		await promise;
+
+		expect(activities).toContain("web_search");
 	});
 });

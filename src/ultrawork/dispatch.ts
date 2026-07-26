@@ -102,7 +102,36 @@ export type DispatchTaskResult = {
 	 * from one still waiting for a free worker slot (`!started`).
 	 */
 	started?: boolean;
+	/**
+	 * Latest human-readable activity of the child (e.g. "web_search", "thinking…",
+	 * "Edit"), derived from its NDJSON event stream. Surfaced live so the main chat
+	 * isn't blind to what each dispatched task is doing until it finishes.
+	 */
+	activity?: string;
 };
+
+/**
+ * Map a child NDJSON session event to a short activity label for live progress.
+ * The child (`pi --mode json`) streams every session event as one JSON line; we
+ * only translate the few that indicate "what is it doing right now".
+ */
+export function activityFromChildEvent(event: unknown): string | undefined {
+	if (!isRecord(event)) return undefined;
+	switch (event["type"]) {
+		case "tool_execution_start":
+			return typeof event["toolName"] === "string" && event["toolName"]
+				? event["toolName"]
+				: "using a tool";
+		case "tool_execution_end":
+			return "working…";
+		case "message_start":
+			return "responding…";
+		case "turn_start":
+			return "thinking…";
+		default:
+			return undefined;
+	}
+}
 
 export type DispatchDetails = {
 	results: DispatchTaskResult[];
@@ -184,13 +213,20 @@ export function truncateOutput(output: string): string {
 	return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted.]`;
 }
 
+/** One-line, length-capped label for a task, used in the live progress grid. */
+export function dispatchTaskLabel(task: string, max = 60): string {
+	const oneLine = task.replace(/\s+/g, " ").trim();
+	return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
 export type RunDispatchTaskOptions = {
 	defaultCwd: string;
 	index: number;
 	task: string;
 	cwd: string | undefined;
 	signal: AbortSignal | undefined;
-	onProgress: (() => void) | undefined;
+	/** Called on child progress; receives a fresh activity label when one is known. */
+	onProgress: ((activity?: string) => void) | undefined;
 	timeoutMs?: number;
 };
 
@@ -229,16 +265,20 @@ export async function runDispatchTask(
 			} catch {
 				return;
 			}
-			if (
-				!isRecord(event) ||
-				event["type"] !== "message_end" ||
-				!isRecord(event["message"])
-			)
+			if (!isRecord(event)) return;
+			if (event["type"] === "message_end" && isRecord(event["message"])) {
+				messages.push(event["message"]);
+				const latest = getFinalOutput(messages);
+				if (latest) result.output = latest;
+				onProgress?.();
 				return;
-			messages.push(event["message"]);
-			const latest = getFinalOutput(messages);
-			if (latest) result.output = latest;
-			onProgress?.();
+			}
+			// Live activity signals — surface what the child is doing right now.
+			const activity = activityFromChildEvent(event);
+			if (activity !== undefined) {
+				result.activity = activity;
+				onProgress?.(activity);
+			}
 		};
 
 		proc.stdout?.on("data", (data: Buffer) => {
@@ -384,13 +424,19 @@ export async function runDispatch(
 		const running = allResults.filter(
 			(r) => r.started === true && r.exitCode === -1,
 		).length;
+		// Header line + one live line per in-flight task showing its current activity,
+		// so the main chat streams what each child is doing instead of going dark.
+		const lines = [
+			`ulw_dispatch: ${done}/${allResults.length} done · ${running} running`,
+		];
+		for (const r of allResults) {
+			if (r.started === true && r.exitCode === -1) {
+				const activity = r.activity ? ` — ${r.activity}` : "";
+				lines.push(`  [${r.index}]${activity}: ${dispatchTaskLabel(r.task)}`);
+			}
+		}
 		onUpdate({
-			content: [
-				{
-					type: "text",
-					text: `ulw_dispatch: ${done}/${allResults.length} done · ${running} running`,
-				},
-			],
+			content: [{ type: "text", text: lines.join("\n") }],
 			details: { results: [...allResults] },
 		});
 	};
@@ -410,7 +456,11 @@ export async function runDispatch(
 				task: t.task,
 				cwd: t.cwd,
 				signal,
-				onProgress: emitUpdate,
+				onProgress: (activity?: string) => {
+					const cur = allResults[index];
+					if (cur && activity !== undefined) cur.activity = activity;
+					emitUpdate();
+				},
 			});
 			allResults[index] = { ...result, started: true };
 			emitUpdate();

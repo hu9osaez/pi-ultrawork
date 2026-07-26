@@ -21,15 +21,22 @@ import {
 import { formatRunForUser, ultraworkStatusLabel } from "./ultrawork/format.js";
 import {
 	buildContinuationPrompt,
+	buildReinjectDirective,
 	buildUltraworkDirective,
 } from "./ultrawork/prompt.js";
 import {
+	addSteer,
 	completeRun,
+	consumePendingReinject,
+	consumeSteers,
+	isAlwaysOn,
 	isTriggerDisabled,
 	markRunStuck,
 	readRun,
 	recordAutoContinueAttempt,
 	recordDispatch,
+	setAlwaysOn,
+	setPendingReinject,
 	setTriggerDisabled,
 	stopRun,
 	triggerRun,
@@ -217,6 +224,42 @@ export default function (pi: ExtensionAPI): void {
 						);
 						return;
 					}
+					case "always-on": {
+						// Every prompt now starts/refreshes a run. Clears triggerDisabled by mutex.
+						await setAlwaysOn(ref, true);
+						ctx.ui.notify(
+							'UltraWork always-on — every message now runs in UltraWork mode. Say "/ulw always off" to revert.',
+							"info",
+						);
+						return;
+					}
+					case "always-off": {
+						// Stop auto-triggering every prompt. Does NOT stop an in-flight run
+						// (that is what /ulw stop is for).
+						await setAlwaysOn(ref, false);
+						ctx.ui.notify(
+							'UltraWork always-on disabled — only messages containing "ultrawork"/"ulw" trigger the mode again.',
+							"info",
+						);
+						return;
+					}
+					case "steer": {
+						// Inject a mid-run instruction, consumed on the next continuation turn.
+						const updated = await addSteer(ref, command.text);
+						if (updated === null || updated.status !== "running") {
+							ctx.ui.notify(
+								"No running UltraWork run to steer. Start one first, then /ulw steer <text>.",
+								"warning",
+							);
+							return;
+						}
+						const queued = updated.pendingSteers?.length ?? 0;
+						ctx.ui.notify(
+							`Steer queued (${queued} pending) — applied on the next UltraWork continuation.`,
+							"info",
+						);
+						return;
+					}
 					case "unknown": {
 						ctx.ui.notify(
 							`Unknown /ulw subcommand: "${command.input}"\n${ULW_USAGE}`,
@@ -244,32 +287,65 @@ export default function (pi: ExtensionAPI): void {
 	// matches the trigger pattern. So this is not a verified safety net against
 	// our own continuation messages; it only covers real user-authored turns.
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (!ULTRAWORK_TRIGGER_PATTERN.test(event.prompt)) return;
-
 		const ref = ultraworkStoreRef(ctx);
 		try {
-			// Kill switch: when the user has run `/ulw off`, the keyword no longer
-			// activates the mode, so they can type "ultrawork"/"ulw" freely (e.g. while
-			// developing this extension) until they re-arm it with `/ulw on`.
-			if (await isTriggerDisabled(ref)) return;
+			const keywordMatch = ULTRAWORK_TRIGGER_PATTERN.test(event.prompt);
+			// Kill switch (`/ulw off`) mutes the keyword; always-on (`/ulw always on`)
+			// turns EVERY prompt into an UltraWork turn. They are mutually exclusive.
+			const triggerDisabled = await isTriggerDisabled(ref);
+			const alwaysOn = await isAlwaysOn(ref);
+			const shouldTrigger = (keywordMatch && !triggerDisabled) || alwaysOn;
 
-			const { run, fresh } = await triggerRun(ref, event.prompt);
-			updateUltraworkUiBestEffort(ctx, run);
-			if (!fresh) return;
+			if (shouldTrigger) {
+				const { run, fresh } = await triggerRun(ref, event.prompt);
+				updateUltraworkUiBestEffort(ctx, run);
+				if (fresh) {
+					// Visible (unlike the hidden continuation nudges below): the user asked
+					// to actually see what gets injected when UltraWork triggers.
+					return {
+						message: {
+							customType: ULTRAWORK_DIRECTIVE_MESSAGE_TYPE,
+							content: buildUltraworkDirective(run),
+							display: true,
+						},
+					};
+				}
+			}
 
-			// Visible (unlike the hidden continuation nudges below): the user asked to
-			// actually see what gets injected when UltraWork triggers, not just infer
-			// it from the footer badge.
-			return {
-				message: {
-					customType: ULTRAWORK_DIRECTIVE_MESSAGE_TYPE,
-					content: buildUltraworkDirective(run),
-					display: true,
-				},
-			};
+			// Post-compaction bridge: session_compact can't inject on its own, so it
+			// flags the run and we restore the mode framing here — even when this prompt
+			// carried no keyword — then clear the flag so it fires exactly once.
+			const current = await readRun(ref);
+			if (
+				current?.status === "running" &&
+				(await consumePendingReinject(ref))
+			) {
+				updateUltraworkUiBestEffort(ctx, current);
+				return {
+					message: {
+						customType: ULTRAWORK_DIRECTIVE_MESSAGE_TYPE,
+						content: buildReinjectDirective(current),
+						display: true,
+					},
+				};
+			}
+
+			return;
 		} catch (error) {
 			ctx.ui.notify(errorMessage(error), "error");
 			return;
+		}
+	});
+
+	// Post-compaction bridge (Feature A): the `session_compact` event fires after a
+	// compaction rewrites context, which can strip the UltraWork framing. Its
+	// handler returns void so it cannot inject a message itself — instead it flags
+	// the running run, and the next `before_agent_start` re-injects the directive.
+	pi.on("session_compact", async (_event, ctx) => {
+		const ref = ultraworkStoreRef(ctx);
+		const run = await readRun(ref);
+		if (run?.status === "running") {
+			await setPendingReinject(ref);
 		}
 	});
 
@@ -356,7 +432,13 @@ export default function (pi: ExtensionAPI): void {
 		}
 
 		const updated = await recordAutoContinueAttempt(ref);
-		queueHiddenUltraworkPrompt(pi, buildContinuationPrompt(updated ?? run));
+		// Drain any mid-run steers (`/ulw steer <text>`) so they ride this exact
+		// continuation turn once, then are cleared.
+		const steers = await consumeSteers(ref);
+		queueHiddenUltraworkPrompt(
+			pi,
+			buildContinuationPrompt(updated ?? run, steers),
+		);
 	}
 }
 
