@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { AUTO_CONTINUE_CAP } from "../src/ultrawork/continuation.js";
-import { ultraworkStatusText } from "../src/ultrawork/ui.js";
+import {
+	dispatchStatusText,
+	ultraworkStatusText,
+} from "../src/ultrawork/ui.js";
 import type { UltraWorkRun } from "../src/ultrawork/types.js";
 
 describe("ultrawork status indicator text", () => {
@@ -43,6 +46,20 @@ describe("ultrawork status indicator text", () => {
 		const run = testRun({ status: "stuck" });
 		expect(ultraworkStatusText(run)).toBe(
 			`UltraWork stuck after ${AUTO_CONTINUE_CAP} idle retries — say "ultrawork" again to restart`,
+		);
+	});
+});
+
+describe("dispatch live status indicator text", () => {
+	it("shows launched/running/done counts for an in-flight dispatch", () => {
+		expect(dispatchStatusText({ total: 3, done: 0, running: 3 })).toBe(
+			"● UltraWork dispatch — 0/3 done · 3 running",
+		);
+		expect(dispatchStatusText({ total: 3, done: 1, running: 2 })).toBe(
+			"● UltraWork dispatch — 1/3 done · 2 running",
+		);
+		expect(dispatchStatusText({ total: 3, done: 3, running: 0 })).toBe(
+			"● UltraWork dispatch — 3/3 done · 0 running",
 		);
 	});
 });

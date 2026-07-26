@@ -27,10 +27,14 @@ describe("mapWithConcurrencyLimit", () => {
 
 	it("preserves input order regardless of completion order", async () => {
 		const delays = [30, 10, 20, 0];
-		const results = await mapWithConcurrencyLimit(delays, 2, async (delay, index) => {
-			await new Promise((resolve) => setTimeout(resolve, delay));
-			return index;
-		});
+		const results = await mapWithConcurrencyLimit(
+			delays,
+			2,
+			async (delay, index) => {
+				await new Promise((resolve) => setTimeout(resolve, delay));
+				return index;
+			},
+		);
 		expect(results).toEqual([0, 1, 2, 3]);
 	});
 
@@ -94,7 +98,9 @@ describe("currentDispatchDepth", () => {
 	});
 
 	it("falls back to 0 for a garbage value", () => {
-		expect(currentDispatchDepth({ PI_ULTRAWORK_DISPATCH_DEPTH: "not-a-number" })).toBe(0);
+		expect(
+			currentDispatchDepth({ PI_ULTRAWORK_DISPATCH_DEPTH: "not-a-number" }),
+		).toBe(0);
 	});
 
 	it("falls back to 0 for a negative value", () => {
@@ -111,7 +117,12 @@ describe("runDispatch depth guard", () => {
 	it("refuses to dispatch (without spawning any child process) once the max nesting depth is reached", async () => {
 		process.env["PI_ULTRAWORK_DISPATCH_DEPTH"] = String(MAX_DISPATCH_DEPTH);
 
-		const { results, summary } = await runDispatch({ cwd: "/work" }, { tasks: [{ task: "a" }, { task: "b" }] }, undefined, undefined);
+		const { results, summary } = await runDispatch(
+			{ cwd: "/work" },
+			{ tasks: [{ task: "a" }, { task: "b" }] },
+			undefined,
+			undefined,
+		);
 
 		expect(summary).toEqual({ taskCount: 2, succeeded: 0, failed: 2 });
 		expect(results).toHaveLength(2);
@@ -120,6 +131,64 @@ describe("runDispatch depth guard", () => {
 			expect(result.errorMessage).toContain("refused");
 		}
 		expect(spawn).not.toHaveBeenCalled();
+	});
+});
+
+describe("runDispatch progress reporting", () => {
+	class FakeChildProcess extends EventEmitter {
+		stdout = new EventEmitter();
+		stderr = new EventEmitter();
+		killed = false;
+		kill = vi.fn((_signal?: string) => true);
+	}
+
+	afterEach(() => {
+		delete process.env["PI_ULTRAWORK_DISPATCH_DEPTH"];
+		vi.mocked(spawn).mockReset();
+	});
+
+	it("emits a running transition (started, not yet done) before tasks finish, then a final all-done frame", async () => {
+		const procs: FakeChildProcess[] = [];
+		vi.mocked(spawn).mockImplementation(() => {
+			const proc = new FakeChildProcess();
+			procs.push(proc);
+			return proc as unknown as ChildProcess;
+		});
+
+		const frames: Array<{ total: number; done: number; running: number }> = [];
+		const onUpdate = (partial: {
+			details?: { results: DispatchTaskResult[] };
+		}) => {
+			const results = partial.details?.results ?? [];
+			frames.push({
+				total: results.length,
+				done: results.filter((r) => r.exitCode !== -1).length,
+				running: results.filter((r) => r.started === true && r.exitCode === -1)
+					.length,
+			});
+		};
+
+		const promise = runDispatch(
+			{ cwd: "/work" },
+			{ tasks: [{ task: "a" }, { task: "b" }], concurrency: 2 },
+			undefined,
+			onUpdate as never,
+		);
+
+		// Let both workers spawn and mark themselves started.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(procs).toHaveLength(2);
+		expect(frames.some((f) => f.running === 2 && f.done === 0)).toBe(true);
+
+		for (const proc of procs) {
+			const line = `${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } })}\n`;
+			proc.stdout.emit("data", Buffer.from(line));
+			proc.emit("close", 0);
+		}
+
+		const { summary } = await promise;
+		expect(summary).toEqual({ taskCount: 2, succeeded: 2, failed: 0 });
+		expect(frames.at(-1)).toEqual({ total: 2, done: 2, running: 0 });
 	});
 });
 
@@ -136,7 +205,10 @@ describe("getPiInvocation", () => {
 		const thisFile = fileURLToPath(import.meta.url);
 		process.argv[1] = thisFile;
 		const result = getPiInvocation(["--mode", "json"]);
-		expect(result).toEqual({ command: process.execPath, args: [thisFile, "--mode", "json"] });
+		expect(result).toEqual({
+			command: process.execPath,
+			args: [thisFile, "--mode", "json"],
+		});
 	});
 
 	it("falls back to the bare `pi` binary for a bun virtual script under a generic runtime", () => {
@@ -169,7 +241,10 @@ describe("getFinalOutput", () => {
 	it("returns the last assistant text content, scanning from the end", () => {
 		const messages = [
 			{ role: "assistant", content: [{ type: "text", text: "first" }] },
-			{ role: "user", content: [{ type: "text", text: "ignored (not assistant)" }] },
+			{
+				role: "user",
+				content: [{ type: "text", text: "ignored (not assistant)" }],
+			},
 			{ role: "assistant", content: [{ type: "text", text: "second" }] },
 		];
 		expect(getFinalOutput(messages)).toBe("second");
@@ -209,7 +284,9 @@ describe("truncateOutput", () => {
 		expect(body).toBeDefined();
 		// A broken multi-byte sequence would decode with U+FFFD replacement characters.
 		expect(body).not.toContain("�");
-		expect(Buffer.byteLength(body ?? "", "utf8")).toBeLessThanOrEqual(20 * 1024);
+		expect(Buffer.byteLength(body ?? "", "utf8")).toBeLessThanOrEqual(
+			20 * 1024,
+		);
 	});
 });
 
@@ -252,7 +329,12 @@ describe("runDispatchTask", () => {
 		proc.emit("close", 0);
 
 		const result = await promise;
-		expect(result).toEqual({ index: 0, task: "do the thing", exitCode: 0, output: "hello from child" });
+		expect(result).toEqual({
+			index: 0,
+			task: "do the thing",
+			exitCode: 0,
+			output: "hello from child",
+		});
 	});
 
 	it("silently skips malformed / non-JSON NDJSON lines", async () => {
@@ -267,7 +349,10 @@ describe("runDispatchTask", () => {
 		});
 
 		proc.stdout.emit("data", Buffer.from("not json at all\n"));
-		proc.stdout.emit("data", Buffer.from(`${JSON.stringify({ type: "other_event" })}\n`));
+		proc.stdout.emit(
+			"data",
+			Buffer.from(`${JSON.stringify({ type: "other_event" })}\n`),
+		);
 		emitMessageEnd(proc, "the real output");
 		proc.emit("close", 0);
 

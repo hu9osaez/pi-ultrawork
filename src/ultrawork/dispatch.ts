@@ -94,6 +94,12 @@ export type DispatchTaskResult = {
 	exitCode: number;
 	output: string;
 	errorMessage?: string;
+	/**
+	 * True once the child process for this task has been spawned. Lets observers
+	 * distinguish a task that is actively running (`started && exitCode === -1`)
+	 * from one still waiting for a free worker slot (`!started`).
+	 */
+	started?: boolean;
 };
 
 export type DispatchDetails = {
@@ -110,7 +116,7 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
 	const limit = Math.max(1, Math.min(concurrency, items.length));
 	const results: TOut[] = new Array(items.length);
 	let nextIndex = 0;
-	const workers = new Array(limit).fill(null).map(async () => {
+	const runWorker = async (): Promise<void> => {
 		for (;;) {
 			const current = nextIndex++;
 			if (current >= items.length) return;
@@ -118,7 +124,8 @@ export async function mapWithConcurrencyLimit<TIn, TOut>(
 			if (item === undefined) return;
 			results[current] = await fn(item, current);
 		}
-	});
+	};
+	const workers = Array.from({ length: limit }, () => runWorker());
 	await Promise.all(workers);
 	return results;
 }
@@ -331,11 +338,14 @@ export async function runDispatch(
 	const emitUpdate = () => {
 		if (!onUpdate) return;
 		const done = allResults.filter((r) => r.exitCode !== -1).length;
+		const running = allResults.filter(
+			(r) => r.started === true && r.exitCode === -1,
+		).length;
 		onUpdate({
 			content: [
 				{
 					type: "text",
-					text: `ulw_dispatch: ${done}/${allResults.length} done`,
+					text: `ulw_dispatch: ${done}/${allResults.length} done · ${running} running`,
 				},
 			],
 			details: { results: [...allResults] },
@@ -346,6 +356,11 @@ export async function runDispatch(
 		tasks,
 		concurrency,
 		async (t, index) => {
+			// Mark started the moment a worker picks this task up, so observers see it
+			// move from pending → running immediately (not only when it finishes).
+			const existing = allResults[index];
+			if (existing) existing.started = true;
+			emitUpdate();
 			const result = await runDispatchTask({
 				defaultCwd: ctx.cwd,
 				index,
@@ -354,7 +369,7 @@ export async function runDispatch(
 				signal,
 				onProgress: emitUpdate,
 			});
-			allResults[index] = result;
+			allResults[index] = { ...result, started: true };
 			emitUpdate();
 			return result;
 		},

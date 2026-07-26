@@ -3,31 +3,54 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/ultrawork/dispatch.js", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("../src/ultrawork/dispatch.js")>();
+	const actual =
+		await importOriginal<typeof import("../src/ultrawork/dispatch.js")>();
 	return { ...actual, runDispatch: vi.fn() };
 });
 
 import extension from "../src/index.js";
 import { AUTO_CONTINUE_CAP } from "../src/ultrawork/continuation.js";
-import { DispatchParams, runDispatch, summarizeDispatchResults } from "../src/ultrawork/dispatch.js";
-import { buildContinuationPrompt, buildUltraworkDirective } from "../src/ultrawork/prompt.js";
-import { readRun, recordAutoContinueAttempt, stopRun, triggerRun, ultraworkStoreRef } from "../src/ultrawork/store.js";
-import type { UltraWorkRun, UltraWorkStoreRef } from "../src/ultrawork/types.js";
+import {
+	DispatchParams,
+	runDispatch,
+	summarizeDispatchResults,
+} from "../src/ultrawork/dispatch.js";
+import {
+	buildContinuationPrompt,
+	buildUltraworkDirective,
+} from "../src/ultrawork/prompt.js";
+import {
+	readRun,
+	recordAutoContinueAttempt,
+	stopRun,
+	triggerRun,
+	ultraworkStoreRef,
+} from "../src/ultrawork/store.js";
+import type {
+	UltraWorkRun,
+	UltraWorkStoreRef,
+} from "../src/ultrawork/types.js";
 import { STATUS_KEY, ultraworkStatusText } from "../src/ultrawork/ui.js";
 
 const ULTRAWORK_CONTINUATION_MESSAGE_TYPE = "pi-ultrawork-continuation";
 const ULTRAWORK_DIRECTIVE_MESSAGE_TYPE = "pi-ultrawork-directive";
-const STALE_EXTENSION_CONTEXT_ERROR_PREFIX = "This extension ctx is stale after session replacement or reload.";
+const STALE_EXTENSION_CONTEXT_ERROR_PREFIX =
+	"This extension ctx is stale after session replacement or reload.";
 
 const tempDirs: string[] = [];
 
 afterEach(async () => {
 	vi.mocked(runDispatch).mockReset();
-	await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+	await Promise.all(
+		tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+	);
 });
 
 describe("index extension wiring", () => {
@@ -76,31 +99,105 @@ describe("ulw_dispatch tool execution", () => {
 		await triggerRun(ref, "ultrawork ship it");
 
 		const fakeResults = [{ index: 0, task: "a", exitCode: 0, output: "done" }];
-		vi.mocked(runDispatch).mockResolvedValue({ results: fakeResults, summary: { taskCount: 1, succeeded: 1, failed: 0 } });
+		vi.mocked(runDispatch).mockResolvedValue({
+			results: fakeResults,
+			summary: { taskCount: 1, succeeded: 1, failed: 0 },
+		});
 
-		const response = await tool.execute("call-1", { tasks: [{ task: "a" }] }, undefined, undefined, ctx);
+		const response = await tool.execute(
+			"call-1",
+			{ tasks: [{ task: "a" }] },
+			undefined,
+			undefined,
+			ctx,
+		);
 
-		expect(runDispatch).toHaveBeenCalledWith(ctx, { tasks: [{ task: "a" }] }, undefined, undefined);
+		// The handler now wraps onUpdate in a footer-mirroring callback, so the 4th arg is a function.
+		expect(runDispatch).toHaveBeenCalledWith(
+			ctx,
+			{ tasks: [{ task: "a" }] },
+			undefined,
+			expect.any(Function),
+		);
 		expect(response.details.results).toEqual(fakeResults);
-		expect(response.content[0].text).toBe(summarizeDispatchResults(fakeResults));
+		expect(response.content[0].text).toBe(
+			summarizeDispatchResults(fakeResults),
+		);
 
 		const updatedRun = await readRun(ref);
 		expect(updatedRun?.dispatchCount).toBe(1);
-		expect(statuses.get(STATUS_KEY)).toBe(ultraworkStatusText(updatedRun as UltraWorkRun));
+		expect(statuses.get(STATUS_KEY)).toBe(
+			ultraworkStatusText(updatedRun as UltraWorkRun),
+		);
 	});
 
-	it("does not touch the footer when no run exists", async () => {
+	it("does not touch the footer when no run exists and no live progress was shown", async () => {
 		const { api, tools } = createFakeApi();
 		extension(api);
 		const tool = tools.find((t) => t.name === "ulw_dispatch");
 		if (!tool) throw new Error("tool not registered");
 
 		const { ctx, statuses } = await createFakeCtx();
-		vi.mocked(runDispatch).mockResolvedValue({ results: [], summary: { taskCount: 0, succeeded: 0, failed: 0 } });
+		vi.mocked(runDispatch).mockResolvedValue({
+			results: [],
+			summary: { taskCount: 0, succeeded: 0, failed: 0 },
+		});
 
-		await tool.execute("call-1", { tasks: [{ task: "a" }] }, undefined, undefined, ctx);
+		await tool.execute(
+			"call-1",
+			{ tasks: [{ task: "a" }] },
+			undefined,
+			undefined,
+			ctx,
+		);
 
 		expect(statuses.has(STATUS_KEY)).toBe(false);
+	});
+
+	it("announces the launch and mirrors live dispatch progress onto the footer", async () => {
+		const { api, tools } = createFakeApi();
+		extension(api);
+		const tool = tools.find((t) => t.name === "ulw_dispatch");
+		if (!tool) throw new Error("tool not registered");
+
+		const { ctx, ref, statuses, notifications } = await createFakeCtx();
+		await triggerRun(ref, "ultrawork ship it");
+
+		const liveStatuses: Array<string | undefined> = [];
+		// Make the mocked runDispatch drive the handler's onUpdate to simulate live progress.
+		vi.mocked(runDispatch).mockImplementation(
+			async (_ctx, _params, _signal, onUpdate) => {
+				onUpdate?.({
+					content: [{ type: "text", text: "live" }],
+					details: {
+						results: [
+							{ index: 0, task: "a", exitCode: -1, output: "", started: true },
+							{ index: 1, task: "b", exitCode: -1, output: "", started: true },
+						],
+					},
+				});
+				liveStatuses.push(statuses.get(STATUS_KEY));
+				return {
+					results: [],
+					summary: { taskCount: 2, succeeded: 2, failed: 0 },
+				};
+			},
+		);
+
+		await tool.execute(
+			"call-1",
+			{ tasks: [{ task: "a" }, { task: "b" }] },
+			undefined,
+			undefined,
+			ctx,
+		);
+
+		expect(
+			notifications.some((n) => n.message.includes("launching 2 sub-tasks")),
+		).toBe(true);
+		expect(liveStatuses).toContain(
+			"● UltraWork dispatch — 0/2 done · 2 running",
+		);
 	});
 });
 
@@ -111,10 +208,18 @@ describe("ulw_complete tool execution", () => {
 		const tool = tools.find((t) => t.name === "ulw_complete");
 		if (!tool) throw new Error("tool not registered");
 
-		const { ctx, ref, statuses } = await createFakeCtx({ hasPendingMessages: false });
+		const { ctx, ref, statuses } = await createFakeCtx({
+			hasPendingMessages: false,
+		});
 		await triggerRun(ref, "ultrawork ship it");
 
-		const response = await tool.execute("call-1", { summary: "shipped it" }, undefined, undefined, ctx);
+		const response = await tool.execute(
+			"call-1",
+			{ summary: "shipped it" },
+			undefined,
+			undefined,
+			ctx,
+		);
 
 		expect(response.content[0].text).toContain("UltraWork complete");
 		expect(response.content[0].text).toContain("shipped it");
@@ -123,7 +228,9 @@ describe("ulw_complete tool execution", () => {
 		const run = await readRun(ref);
 		expect(run?.status).toBe("complete");
 		expect(run?.summary).toBe("shipped it");
-		expect(statuses.get(STATUS_KEY)).toBe(ultraworkStatusText(run as UltraWorkRun));
+		expect(statuses.get(STATUS_KEY)).toBe(
+			ultraworkStatusText(run as UltraWorkRun),
+		);
 
 		// A completed run must never get an auto-continuation prompt queued for it.
 		await handlers.get("agent_settled")?.({ type: "agent_settled" }, ctx);
@@ -138,7 +245,13 @@ describe("ulw_complete tool execution", () => {
 
 		const { ctx } = await createFakeCtx();
 
-		const response = await tool.execute("call-1", {}, undefined, undefined, ctx);
+		const response = await tool.execute(
+			"call-1",
+			{},
+			undefined,
+			undefined,
+			ctx,
+		);
 
 		expect(response.content[0].text).toContain("No UltraWork run to complete");
 		expect(response.details.run).toBeNull();
@@ -151,15 +264,23 @@ describe("before_agent_start trigger detection", () => {
 		extension(api);
 		const { ctx, ref, statuses } = await createFakeCtx();
 
-		const result = await handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt: "let's ultrawork this feature" }, ctx);
+		const result = await handlers.get("before_agent_start")?.(
+			{ type: "before_agent_start", prompt: "let's ultrawork this feature" },
+			ctx,
+		);
 
 		const run = await readRun(ref);
 		expect(run?.status).toBe("running");
 		expect(run?.goal).toBe("let's ultrawork this feature");
 		expect(statuses.get(STATUS_KEY)).toContain("running");
 
-		expect(result?.message).toMatchObject({ customType: ULTRAWORK_DIRECTIVE_MESSAGE_TYPE, display: true });
-		expect(result?.message?.content).toBe(buildUltraworkDirective(run as UltraWorkRun));
+		expect(result?.message).toMatchObject({
+			customType: ULTRAWORK_DIRECTIVE_MESSAGE_TYPE,
+			display: true,
+		});
+		expect(result?.message?.content).toBe(
+			buildUltraworkDirective(run as UltraWorkRun),
+		);
 	});
 
 	it("matches the bare 'ulw' keyword as a whole word too", async () => {
@@ -167,7 +288,10 @@ describe("before_agent_start trigger detection", () => {
 		extension(api);
 		const { ctx, ref } = await createFakeCtx();
 
-		await handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt: "ulw fix the auth bug" }, ctx);
+		await handlers.get("before_agent_start")?.(
+			{ type: "before_agent_start", prompt: "ulw fix the auth bug" },
+			ctx,
+		);
 
 		const run = await readRun(ref);
 		expect(run?.status).toBe("running");
@@ -178,9 +302,13 @@ describe("before_agent_start trigger detection", () => {
 		extension(api);
 		const { ctx, ref } = await createFakeCtx();
 
-		const result = await handlers
-			.get("before_agent_start")
-			?.({ type: "before_agent_start", prompt: "ultraworking on the bulwark defenses" }, ctx);
+		const result = await handlers.get("before_agent_start")?.(
+			{
+				type: "before_agent_start",
+				prompt: "ultraworking on the bulwark defenses",
+			},
+			ctx,
+		);
 
 		expect(result).toBeUndefined();
 		expect(await readRun(ref)).toBeNull();
@@ -191,13 +319,20 @@ describe("before_agent_start trigger detection", () => {
 		extension(api);
 		const { ctx, ref } = await createFakeCtx();
 
-		await handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt: "ultrawork the original goal" }, ctx);
+		await handlers.get("before_agent_start")?.(
+			{ type: "before_agent_start", prompt: "ultrawork the original goal" },
+			ctx,
+		);
 		await recordAutoContinueAttempt(ref);
 		const before = await readRun(ref);
 
-		const result = await handlers
-			.get("before_agent_start")
-			?.({ type: "before_agent_start", prompt: "ultrawork mentioned again mid-run" }, ctx);
+		const result = await handlers.get("before_agent_start")?.(
+			{
+				type: "before_agent_start",
+				prompt: "ultrawork mentioned again mid-run",
+			},
+			ctx,
+		);
 
 		expect(result).toBeUndefined();
 		const after = await readRun(ref);
@@ -213,7 +348,10 @@ describe("before_agent_start trigger detection", () => {
 		extension(api);
 		const { ctx, ref } = await createFakeCtx();
 
-		const result = await handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt: "just fix the bug please" }, ctx);
+		const result = await handlers.get("before_agent_start")?.(
+			{ type: "before_agent_start", prompt: "just fix the bug please" },
+			ctx,
+		);
 
 		expect(result).toBeUndefined();
 		expect(await readRun(ref)).toBeNull();
@@ -225,7 +363,10 @@ describe("before_agent_start trigger detection", () => {
 		const { ctx, ref, notifications } = await createFakeCtx();
 
 		const overlong = `ultrawork ${"x".repeat(5000)}`;
-		const result = await handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt: overlong }, ctx);
+		const result = await handlers.get("before_agent_start")?.(
+			{ type: "before_agent_start", prompt: overlong },
+			ctx,
+		);
 
 		expect(result).toBeUndefined();
 		expect(notifications.at(-1)).toMatchObject({ type: "error" });
@@ -238,7 +379,9 @@ describe("stuck-detector cap", () => {
 	it("queues hidden continuations up to the cap, then marks the run stuck and stops queueing", async () => {
 		const { api, handlers, sentMessages } = createFakeApi();
 		extension(api);
-		const { ctx, ref, notifications, statuses } = await createFakeCtx({ hasPendingMessages: false });
+		const { ctx, ref, notifications, statuses } = await createFakeCtx({
+			hasPendingMessages: false,
+		});
 		await triggerRun(ref, "ultrawork keep going");
 
 		for (let attempt = 1; attempt <= AUTO_CONTINUE_CAP; attempt++) {
@@ -289,8 +432,17 @@ describe("stuck-detector cap", () => {
 		}
 		expect((await readRun(ref))?.autoContinueAttempts).toBe(AUTO_CONTINUE_CAP);
 
-		vi.mocked(runDispatch).mockResolvedValue({ results: [], summary: { taskCount: 1, succeeded: 1, failed: 0 } });
-		await dispatchTool.execute("call-1", { tasks: [{ task: "a" }] }, undefined, undefined, ctx);
+		vi.mocked(runDispatch).mockResolvedValue({
+			results: [],
+			summary: { taskCount: 1, succeeded: 1, failed: 0 },
+		});
+		await dispatchTool.execute(
+			"call-1",
+			{ tasks: [{ task: "a" }] },
+			undefined,
+			undefined,
+			ctx,
+		);
 		expect((await readRun(ref))?.autoContinueAttempts).toBe(0);
 
 		sentMessages.length = 0;
@@ -324,13 +476,17 @@ describe("/ulw command", () => {
 		await commands.get("ulw")?.handler("status", ctx);
 
 		expect(notifications.at(-1)).toMatchObject({ type: "info" });
-		expect(notifications.at(-1)?.message).toContain("Goal: ultrawork ship the release");
+		expect(notifications.at(-1)?.message).toContain(
+			"Goal: ultrawork ship the release",
+		);
 	});
 
 	it("stop: stops the run, notifies, and does not queue continuation", async () => {
 		const { api, commands, handlers, sentMessages } = createFakeApi();
 		extension(api);
-		const { ctx, ref, notifications } = await createFakeCtx({ hasPendingMessages: false });
+		const { ctx, ref, notifications } = await createFakeCtx({
+			hasPendingMessages: false,
+		});
 		await triggerRun(ref, "ultrawork keep going");
 
 		await commands.get("ulw")?.handler("stop", ctx);
@@ -351,7 +507,9 @@ describe("/ulw command", () => {
 		await commands.get("ulw")?.handler("frobnicate", ctx);
 
 		expect(notifications.at(-1)).toMatchObject({ type: "warning" });
-		expect(notifications.at(-1)?.message).toContain('Unknown /ulw subcommand: "frobnicate"');
+		expect(notifications.at(-1)?.message).toContain(
+			'Unknown /ulw subcommand: "frobnicate"',
+		);
 	});
 
 	it("start/resume are no longer recognized verbs: they fall through to unknown", async () => {
@@ -360,10 +518,14 @@ describe("/ulw command", () => {
 		const { ctx, notifications } = await createFakeCtx();
 
 		await commands.get("ulw")?.handler("start ship the release", ctx);
-		expect(notifications.at(-1)?.message).toContain('Unknown /ulw subcommand: "start ship the release"');
+		expect(notifications.at(-1)?.message).toContain(
+			'Unknown /ulw subcommand: "start ship the release"',
+		);
 
 		await commands.get("ulw")?.handler("resume", ctx);
-		expect(notifications.at(-1)?.message).toContain('Unknown /ulw subcommand: "resume"');
+		expect(notifications.at(-1)?.message).toContain(
+			'Unknown /ulw subcommand: "resume"',
+		);
 	});
 
 	it("surfaces thrown errors from the command handler as error notifications", async () => {
@@ -373,7 +535,10 @@ describe("/ulw command", () => {
 
 		await commands.get("ulw")?.handler("stop", ctx);
 
-		expect(notifications.at(-1)).toEqual({ message: "No UltraWork run to stop.", type: "error" });
+		expect(notifications.at(-1)).toEqual({
+			message: "No UltraWork run to stop.",
+			type: "error",
+		});
 	});
 });
 
@@ -381,13 +546,22 @@ describe("session_start event", () => {
 	it("queues hidden continuation for a running run when idle with nothing pending", async () => {
 		const { api, handlers, sentMessages } = createFakeApi();
 		extension(api);
-		const { ctx, ref } = await createFakeCtx({ isIdle: true, hasPendingMessages: false });
+		const { ctx, ref } = await createFakeCtx({
+			isIdle: true,
+			hasPendingMessages: false,
+		});
 		const { run } = await triggerRun(ref, "ultrawork resume me");
 
-		await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+		await handlers.get("session_start")?.(
+			{ type: "session_start", reason: "startup" },
+			ctx,
+		);
 
 		expect(sentMessages).toHaveLength(1);
-		expect(sentMessages[0]?.message).toMatchObject({ customType: ULTRAWORK_CONTINUATION_MESSAGE_TYPE, display: false });
+		expect(sentMessages[0]?.message).toMatchObject({
+			customType: ULTRAWORK_CONTINUATION_MESSAGE_TYPE,
+			display: false,
+		});
 		expect(sentMessages[0]?.message.content).toBe(buildContinuationPrompt(run));
 
 		const updated = await readRun(ref);
@@ -397,10 +571,16 @@ describe("session_start event", () => {
 	it("does not queue continuation when there are pending messages", async () => {
 		const { api, handlers, sentMessages } = createFakeApi();
 		extension(api);
-		const { ctx, ref } = await createFakeCtx({ isIdle: true, hasPendingMessages: true });
+		const { ctx, ref } = await createFakeCtx({
+			isIdle: true,
+			hasPendingMessages: true,
+		});
 		await triggerRun(ref, "ultrawork resume me");
 
-		await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+		await handlers.get("session_start")?.(
+			{ type: "session_start", reason: "startup" },
+			ctx,
+		);
 
 		expect(sentMessages).toHaveLength(0);
 	});
@@ -410,7 +590,10 @@ describe("session_start event", () => {
 		extension(api);
 		const { ctx, statuses } = await createFakeCtx();
 
-		await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+		await handlers.get("session_start")?.(
+			{ type: "session_start", reason: "startup" },
+			ctx,
+		);
 
 		expect(statuses.has(STATUS_KEY)).toBe(true);
 		expect(statuses.get(STATUS_KEY)).toBeUndefined();
@@ -438,7 +621,9 @@ describe("agent_start / agent_end footer refresh (best-effort)", () => {
 			throw new Error(`${STALE_EXTENSION_CONTEXT_ERROR_PREFIX} details`);
 		};
 
-		await expect(handlers.get("agent_start")?.({ type: "agent_start" }, ctx)).resolves.toBeUndefined();
+		await expect(
+			handlers.get("agent_start")?.({ type: "agent_start" }, ctx),
+		).resolves.toBeUndefined();
 	});
 
 	it("agent_start rethrows non-stale-context errors", async () => {
@@ -450,13 +635,17 @@ describe("agent_start / agent_end footer refresh (best-effort)", () => {
 			throw new Error("boom");
 		};
 
-		await expect(handlers.get("agent_start")?.({ type: "agent_start" }, ctx)).rejects.toThrow("boom");
+		await expect(
+			handlers.get("agent_start")?.({ type: "agent_start" }, ctx),
+		).rejects.toThrow("boom");
 	});
 
 	it("agent_end refreshes the footer but no longer queues continuation itself (that moved to agent_settled)", async () => {
 		const { api, handlers, sentMessages } = createFakeApi();
 		extension(api);
-		const { ctx, ref, statuses } = await createFakeCtx({ hasPendingMessages: false });
+		const { ctx, ref, statuses } = await createFakeCtx({
+			hasPendingMessages: false,
+		});
 		await triggerRun(ref, "ultrawork track me");
 
 		await handlers.get("agent_end")?.({ type: "agent_end", messages: [] }, ctx);
@@ -508,7 +697,10 @@ describe("session_shutdown event", () => {
 		extension(api);
 		const { ctx, statuses } = await createFakeCtx({ hasUI: true });
 
-		await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, ctx);
+		await handlers.get("session_shutdown")?.(
+			{ type: "session_shutdown", reason: "quit" },
+			ctx,
+		);
 
 		expect(statuses.get(STATUS_KEY)).toBeUndefined();
 		expect(statuses.has(STATUS_KEY)).toBe(true);
@@ -519,7 +711,10 @@ describe("session_shutdown event", () => {
 		extension(api);
 		const { ctx, statuses } = await createFakeCtx({ hasUI: false });
 
-		await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, ctx);
+		await handlers.get("session_shutdown")?.(
+			{ type: "session_shutdown", reason: "quit" },
+			ctx,
+		);
 
 		expect(statuses.has(STATUS_KEY)).toBe(false);
 	});
@@ -532,7 +727,12 @@ describe("session_shutdown event", () => {
 			throw new Error("ctx already torn down");
 		};
 
-		await expect(handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, ctx)).resolves.toBeUndefined();
+		await expect(
+			handlers.get("session_shutdown")?.(
+				{ type: "session_shutdown", reason: "quit" },
+				ctx,
+			),
+		).resolves.toBeUndefined();
 	});
 });
 
@@ -543,8 +743,13 @@ type FakeHandler = (
 	ctx: ExtensionCommandContext,
 	// biome-ignore lint/suspicious/noExplicitAny: test harness stand-in for the various ExtensionEvent handler return types
 ) => Promise<any> | any;
-type FakeCommand = { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> };
-type FakeSentMessage = { message: { customType: string; content: string; display: boolean }; options: unknown };
+type FakeCommand = {
+	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+};
+type FakeSentMessage = {
+	message: { customType: string; content: string; display: boolean };
+	options: unknown;
+};
 type FakeTool = {
 	name: string;
 	label: string;
@@ -587,28 +792,46 @@ function createFakeApi(): {
 		},
 	};
 
-	return { api: fakeApi as unknown as ExtensionAPI, tools, commands, handlers, sentMessages };
+	return {
+		api: fakeApi as unknown as ExtensionAPI,
+		tools,
+		commands,
+		handlers,
+		sentMessages,
+	};
 }
 
 async function createFakeCtx(
-	options: { isIdle?: boolean; hasPendingMessages?: boolean; hasUI?: boolean } = {},
+	options: {
+		isIdle?: boolean;
+		hasPendingMessages?: boolean;
+		hasUI?: boolean;
+	} = {},
 ): Promise<{
 	ctx: ExtensionCommandContext;
 	ref: UltraWorkStoreRef;
-	notifications: Array<{ message: string; type?: "info" | "warning" | "error" }>;
+	notifications: Array<{
+		message: string;
+		type?: "info" | "warning" | "error";
+	}>;
 	statuses: Map<string, string | undefined>;
 }> {
 	const dir = await mkdtemp(join(tmpdir(), "pi-ultrawork-index-"));
 	tempDirs.push(dir);
 	const threadId = `thread-${randomUUID()}`;
 
-	const notifications: Array<{ message: string; type?: "info" | "warning" | "error" }> = [];
+	const notifications: Array<{
+		message: string;
+		type?: "info" | "warning" | "error";
+	}> = [];
 	const statuses = new Map<string, string | undefined>();
 
 	const rawCtx = {
 		ui: {
 			notify: (message: string, type?: "info" | "warning" | "error") => {
-				notifications.push(type === undefined ? { message } : { message, type });
+				notifications.push(
+					type === undefined ? { message } : { message, type },
+				);
 			},
 			setStatus: (key: string, text: string | undefined) => {
 				statuses.set(key, text);

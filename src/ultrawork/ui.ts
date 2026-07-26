@@ -47,3 +47,21 @@ export function ultraworkStatusText(run: UltraWorkRun): string {
 			return `UltraWork stuck after ${AUTO_CONTINUE_CAP} idle retries — say "ultrawork" again to restart`;
 	}
 }
+
+/** Live per-task counts for a running ulw_dispatch call. */
+export type DispatchProgress = {
+	total: number;
+	done: number;
+	running: number;
+};
+
+/**
+ * Footer text shown live while ulw_dispatch is fanning out child processes, so the
+ * user isn't blind to what's happening: how many sub-tasks launched, how many are
+ * in flight right now, and how many have finished. `failed` is folded into `done`
+ * here (see summarizeDispatchResults for the ok/fail breakdown at the end).
+ */
+export function dispatchStatusText(progress: DispatchProgress): string {
+	const { total, done, running } = progress;
+	return `● UltraWork dispatch — ${done}/${total} done · ${running} running`;
+}

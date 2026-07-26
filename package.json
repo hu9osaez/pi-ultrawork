@@ -1,10 +1,15 @@
 {
   "name": "pi-ultrawork",
   "version": "1.0.0",
-  "description": "Persistent background multi-agent orchestration mode for pi.dev: triggered by saying \"ultrawork\"/\"ulw\", a TUI status indicator, capped hidden auto-continuation, and a ulw_dispatch tool for fanning out child pi processes.",
-  "main": "index.js",
+  "description": "Persistent, goal-driven UltraWork mode for pi.dev — auto-continues across turns and fans sub-tasks out to child pi processes.",
   "type": "module",
-  "license": "ISC",
+  "license": "MIT",
+  "files": [
+    "src",
+    "README.md",
+    "SKILL.md",
+    "LICENSE"
+  ],
   "keywords": [
     "pi",
     "pi-coding-agent",
@@ -14,7 +19,7 @@
     "orchestration",
     "tui"
   ],
-  "author": "",
+  "author": "Hugo Sáez",
   "pi": {
     "extensions": [
       "./src/index.ts"

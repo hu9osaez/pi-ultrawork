@@ -36,7 +36,11 @@ import {
 	ultraworkStoreRef,
 } from "./ultrawork/store.js";
 import type { UltraWorkRun, UltraWorkStoreRef } from "./ultrawork/types.js";
-import { STATUS_KEY, updateUltraworkUi } from "./ultrawork/ui.js";
+import {
+	dispatchStatusText,
+	STATUS_KEY,
+	updateUltraworkUi,
+} from "./ultrawork/ui.js";
 
 const ULTRAWORK_CONTINUATION_MESSAGE_TYPE = "pi-ultrawork-continuation";
 const ULTRAWORK_DIRECTIVE_MESSAGE_TYPE = "pi-ultrawork-directive";
@@ -71,14 +75,53 @@ export default function (pi: ExtensionAPI): void {
 		].join(" "),
 		parameters: DispatchParams,
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			// Announce the launch immediately so the user isn't blind at t=0 while the
+			// child pi processes spin up.
+			if (ctx.hasUI) {
+				const count = params.tasks.length;
+				ctx.ui.notify(
+					`ulw_dispatch: launching ${count} sub-task${count === 1 ? "" : "s"}…`,
+					"info",
+				);
+			}
+
+			// Mirror each incremental dispatch update onto the always-visible footer
+			// status, so progress (launched → running → done) shows live instead of only
+			// appearing once the whole tool call returns.
+			let showedDispatchStatus = false;
+			const onDispatchUpdate = (
+				partial: AgentToolResult<DispatchDetails>,
+			): void => {
+				onUpdate?.(partial);
+				if (!ctx.hasUI) return;
+				const taskResults = partial.details?.results ?? [];
+				const total = taskResults.length;
+				const done = taskResults.filter((r) => r.exitCode !== -1).length;
+				const running = taskResults.filter(
+					(r) => r.started === true && r.exitCode === -1,
+				).length;
+				ctx.ui.setStatus(
+					STATUS_KEY,
+					dispatchStatusText({ total, done, running }),
+				);
+				showedDispatchStatus = true;
+			};
+
 			const { results, summary } = await runDispatch(
 				ctx,
 				params,
 				signal,
-				onUpdate,
+				onDispatchUpdate,
 			);
 			const run = await recordDispatch(ultraworkStoreRef(ctx), summary);
-			if (run) updateUltraworkUi(ctx, run);
+			// Restore the normal run status now that the dispatch footer is stale. If
+			// there's no run to restore to, only clear the footer if we actually showed
+			// a live dispatch status (otherwise leave it untouched).
+			if (run) {
+				updateUltraworkUi(ctx, run);
+			} else if (showedDispatchStatus && ctx.hasUI) {
+				ctx.ui.setStatus(STATUS_KEY, undefined);
+			}
 
 			const response: AgentToolResult<DispatchDetails> = {
 				content: [{ type: "text", text: summarizeDispatchResults(results) }],
