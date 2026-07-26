@@ -38,7 +38,7 @@ describe("ultrawork status indicator text", () => {
 	it("shows the stopped indicator with the trigger-word hint", () => {
 		const run = testRun({ status: "stopped" });
 		expect(ultraworkStatusText(run)).toBe(
-			'UltraWork stopped (say "ultrawork" to resume)',
+			'UltraWork stopped (say "ultrawork" to start again)',
 		);
 	});
 

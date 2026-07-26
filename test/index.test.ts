@@ -27,6 +27,7 @@ import {
 	buildUltraworkDirective,
 } from "../src/ultrawork/prompt.js";
 import {
+	isTriggerDisabled,
 	readRun,
 	recordAutoContinueAttempt,
 	stopRun,
@@ -539,6 +540,30 @@ describe("/ulw command", () => {
 			message: "No UltraWork run to stop.",
 			type: "error",
 		});
+	});
+});
+
+describe("/ulw off and on command", () => {
+	it("off sets triggerDisabled to true in the store", async () => {
+		const { api, commands } = createFakeApi();
+		extension(api);
+		const { ctx, ref } = await createFakeCtx();
+
+		expect(await isTriggerDisabled(ref)).toBe(false);
+		await commands.get("ulw")?.handler("off", ctx);
+		expect(await isTriggerDisabled(ref)).toBe(true);
+	});
+
+	it("on clears the disabled flag", async () => {
+		const { api, commands } = createFakeApi();
+		extension(api);
+		const { ctx, ref } = await createFakeCtx();
+
+		await commands.get("ulw")?.handler("off", ctx);
+		expect(await isTriggerDisabled(ref)).toBe(true);
+
+		await commands.get("ulw")?.handler("on", ctx);
+		expect(await isTriggerDisabled(ref)).toBe(false);
 	});
 });
 

@@ -42,7 +42,7 @@ export function ultraworkStatusText(run: UltraWorkRun): string {
 		case "complete":
 			return "UltraWork complete";
 		case "stopped":
-			return 'UltraWork stopped (say "ultrawork" to resume)';
+			return 'UltraWork stopped (say "ultrawork" to start again)';
 		case "stuck":
 			return `UltraWork stuck after ${AUTO_CONTINUE_CAP} idle retries — say "ultrawork" again to restart`;
 	}

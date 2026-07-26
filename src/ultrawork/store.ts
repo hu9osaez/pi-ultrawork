@@ -80,7 +80,21 @@ export async function readStore(
 	const filePath = runFilePath(ref);
 	try {
 		const raw = await readFile(filePath, "utf8");
-		return parseUltraWorkFile(raw);
+		try {
+			return parseUltraWorkFile(raw);
+		} catch (error) {
+			if (
+				error instanceof InvalidUltraWorkStoreError ||
+				error instanceof UnsupportedUltraWorkStoreVersionError
+			) {
+				console.warn(
+					"ultrawork store corrupt or version mismatch, resetting to default:",
+					error.message,
+				);
+				return { version: STORE_VERSION, run: null };
+			}
+			throw error;
+		}
 	} catch (error) {
 		if (isMissingFile(error)) return { version: STORE_VERSION, run: null };
 		throw error;
@@ -271,7 +285,7 @@ export async function recordDispatch(
 	return transitionRun(ref, current, {
 		patch: (run, now) => ({
 			dispatchCount: run.dispatchCount + summary.taskCount,
-			autoContinueAttempts: 0,
+			...(summary.succeeded > 0 ? { autoContinueAttempts: 0 } : {}),
 			lastDispatchAt: now,
 		}),
 	});

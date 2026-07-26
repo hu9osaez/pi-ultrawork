@@ -23,7 +23,9 @@ import { isRecord } from "./types.js";
 export const DEFAULT_CONCURRENCY = 3;
 export const MAX_CONCURRENCY = 6;
 export const MAX_TASKS = 12;
-const PER_TASK_OUTPUT_CAP = 20 * 1024;
+export const PER_TASK_OUTPUT_CAP = 20 * 1024;
+
+export const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Max nesting depth for ulw_dispatch → child `pi` process hops. Depth 0 is the
@@ -189,6 +191,7 @@ export type RunDispatchTaskOptions = {
 	cwd: string | undefined;
 	signal: AbortSignal | undefined;
 	onProgress: (() => void) | undefined;
+	timeoutMs?: number;
 };
 
 export async function runDispatchTask(
@@ -214,6 +217,9 @@ export async function runDispatchTask(
 		let buffer = "";
 		let stderr = "";
 		let wasAborted = false;
+		let timedOut = false;
+		let stdoutOverCap = false;
+		let stderrOverCap = false;
 
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
@@ -236,18 +242,37 @@ export async function runDispatchTask(
 		};
 
 		proc.stdout?.on("data", (data: Buffer) => {
-			buffer += data.toString();
+			if (!stdoutOverCap) {
+				const chunk = data.toString();
+				if (Buffer.byteLength(buffer + chunk, "utf8") > PER_TASK_OUTPUT_CAP) {
+					buffer += "\n\n[stdout truncated: exceeded output cap]";
+					stdoutOverCap = true;
+				} else {
+					buffer += chunk;
+				}
+			}
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
 			for (const line of lines) processLine(line);
 		});
 		proc.stderr?.on("data", (data: Buffer) => {
-			stderr += data.toString();
+			if (!stderrOverCap) {
+				const chunk = data.toString();
+				if (Buffer.byteLength(stderr + chunk, "utf8") > PER_TASK_OUTPUT_CAP) {
+					stderr += "\n\n[stderr truncated: exceeded output cap]";
+					stderrOverCap = true;
+				} else {
+					stderr += chunk;
+				}
+			}
 		});
 		proc.on("close", (code) => {
+			clearTimeout(taskTimeout);
 			if (buffer.trim()) processLine(buffer);
 			result.exitCode = code ?? 1;
-			if (wasAborted) {
+			if (timedOut) {
+				result.errorMessage = "Dispatch task timed out after 10m";
+			} else if (wasAborted) {
 				result.errorMessage = "Dispatch task was aborted";
 			} else if (result.exitCode !== 0) {
 				result.errorMessage = truncateOutput(
@@ -259,6 +284,7 @@ export async function runDispatchTask(
 			resolve();
 		});
 		proc.on("error", (error) => {
+			clearTimeout(taskTimeout);
 			result.exitCode = 1;
 			result.errorMessage = `Failed to spawn pi: ${error.message}`;
 			resolve();
@@ -276,6 +302,16 @@ export async function runDispatchTask(
 			if (signal.aborted) killProc();
 			else signal.addEventListener("abort", killProc, { once: true });
 		}
+
+		const taskTimeout = setTimeout(() => {
+			timedOut = true;
+			proc.kill("SIGTERM");
+			const forceKill = setTimeout(() => {
+				if (!proc.killed) proc.kill("SIGKILL");
+			}, 5000);
+			forceKill.unref();
+		}, options.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS);
+		taskTimeout.unref();
 	});
 
 	return result;
@@ -300,7 +336,13 @@ export async function runDispatch(
 ): Promise<{
 	results: DispatchTaskResult[];
 	summary: { taskCount: number; succeeded: number; failed: number };
+	taskDropWarning?: string;
 }> {
+	const taskDropWarning =
+		params.tasks.length > MAX_TASKS
+			? `ulw_dispatch: ${params.tasks.length - MAX_TASKS} task(s) silently dropped (max ${MAX_TASKS} per call)`
+			: undefined;
+
 	const tasks = params.tasks.slice(0, MAX_TASKS);
 
 	if (currentDispatchDepth() >= MAX_DISPATCH_DEPTH) {
@@ -321,6 +363,7 @@ export async function runDispatch(
 				succeeded: 0,
 				failed: results.length,
 			},
+			...(taskDropWarning ? { taskDropWarning } : {}),
 		};
 	}
 
@@ -383,6 +426,7 @@ export async function runDispatch(
 			succeeded,
 			failed: results.length - succeeded,
 		},
+		...(taskDropWarning ? { taskDropWarning } : {}),
 	};
 }
 

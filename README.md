@@ -95,6 +95,13 @@ Then anyone adds it to their `~/.pi/agent/settings.json`:
 
 and `reload`. That `npm:<package-name>` form is exactly how pi resolves published extensions — the same mechanism as the built-ins.
 
+## Inspiration
+
+UltraWork is inspired by:
+
+- **[lazyclaudecode](https://github.com/code-yeongyu/lazyclaudecode)**
+- **[lazycodex](https://github.com/code-yeongyu/lazycodex)**
+
 ## Development
 
 ```bash

@@ -7,10 +7,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
 	currentDispatchDepth,
+	DEFAULT_TASK_TIMEOUT_MS,
 	getFinalOutput,
 	getPiInvocation,
 	mapWithConcurrencyLimit,
 	MAX_DISPATCH_DEPTH,
+	MAX_TASKS,
+	PER_TASK_OUTPUT_CAP,
 	runDispatch,
 	runDispatchTask,
 	summarizeDispatchResults,
@@ -105,6 +108,82 @@ describe("currentDispatchDepth", () => {
 
 	it("falls back to 0 for a negative value", () => {
 		expect(currentDispatchDepth({ PI_ULTRAWORK_DISPATCH_DEPTH: "-1" })).toBe(0);
+	});
+});
+
+describe("runDispatch taskDropWarning", () => {
+	afterEach(() => {
+		delete process.env["PI_ULTRAWORK_DISPATCH_DEPTH"];
+		vi.mocked(spawn).mockReset();
+	});
+
+	it("includes taskDropWarning when more than MAX_TASKS tasks are passed", async () => {
+		// Fire the depth-guard so no children are actually spawned (spawn would be slow and
+		// the concurrency-limited worker pool would race the test). The depth-guard early
+		// return already includes taskDropWarning, so this is a pure fast-path check.
+		process.env["PI_ULTRAWORK_DISPATCH_DEPTH"] = String(MAX_DISPATCH_DEPTH);
+
+		const tasks = Array.from({ length: MAX_TASKS + 3 }, (_, i) => ({
+			task: `task${i}`,
+		}));
+
+		const { taskDropWarning, results, summary } = await runDispatch(
+			{ cwd: "/work" },
+			{ tasks, concurrency: MAX_TASKS + 1 },
+			undefined,
+			undefined,
+		);
+
+		expect(taskDropWarning).toBeDefined();
+		expect(taskDropWarning).toContain("silently dropped");
+		expect(taskDropWarning).toContain(String(MAX_TASKS));
+		expect(results).toHaveLength(MAX_TASKS);
+		expect(summary).toEqual({
+			taskCount: MAX_TASKS,
+			succeeded: 0,
+			failed: MAX_TASKS,
+		});
+	});
+
+	it("does not include taskDropWarning when tasks are within MAX_TASKS", async () => {
+		class FakeChildProcess extends EventEmitter {
+			stdout = new EventEmitter();
+			stderr = new EventEmitter();
+			killed = false;
+			kill = vi.fn((_signal?: string) => true);
+		}
+
+		const procs: FakeChildProcess[] = [];
+		vi.mocked(spawn).mockImplementation(() => {
+			const proc = new FakeChildProcess();
+			procs.push(proc);
+			return proc as unknown as ChildProcess;
+		});
+
+		const tasks = [{ task: "a" }, { task: "b" }];
+
+		const promise = runDispatch(
+			{ cwd: "/work" },
+			{ tasks, concurrency: 2 },
+			undefined,
+			undefined,
+		);
+
+		for (const proc of procs) {
+			const line = `${JSON.stringify({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "ok" }],
+				},
+			})}\n`;
+			proc.stdout.emit("data", Buffer.from(line));
+			proc.emit("close", 0);
+		}
+
+		const result = await promise;
+		expect(result.taskDropWarning).toBeUndefined();
+		expect(result.results).toHaveLength(2);
 	});
 });
 
@@ -463,5 +542,95 @@ describe("runDispatchTask", () => {
 
 		await vi.advanceTimersByTimeAsync(5000);
 		expect(proc.kill).not.toHaveBeenCalledWith("SIGKILL");
+	});
+
+	it("emits timedOut when task exceeds DEFAULT_TASK_TIMEOUT_MS", async () => {
+		vi.useFakeTimers();
+		const proc = mockSpawn();
+		const promise = runDispatchTask({
+			defaultCwd: "/work",
+			index: 0,
+			task: "t",
+			cwd: undefined,
+			signal: undefined,
+			onProgress: undefined,
+		});
+
+		await vi.advanceTimersByTimeAsync(DEFAULT_TASK_TIMEOUT_MS);
+		expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+
+		proc.emit("close", 143);
+		const result = await promise;
+		expect(result.errorMessage).toBe("Dispatch task timed out after 10m");
+	});
+
+	it("does not time out if the process completes before the deadline", async () => {
+		vi.useFakeTimers();
+		const proc = mockSpawn();
+		const promise = runDispatchTask({
+			defaultCwd: "/work",
+			index: 0,
+			task: "t",
+			cwd: undefined,
+			signal: undefined,
+			onProgress: undefined,
+		});
+
+		emitMessageEnd(proc, "fast result");
+		proc.emit("close", 0);
+
+		const result = await promise;
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe("fast result");
+		expect(result.errorMessage).toBeUndefined();
+
+		// Advance past the timeout — should not trigger since taskTimeout was cleared
+		await vi.advanceTimersByTimeAsync(DEFAULT_TASK_TIMEOUT_MS + 1000);
+		expect(proc.kill).not.toHaveBeenCalled();
+	});
+
+	it("caps stderr accumulation at PER_TASK_OUTPUT_CAP with truncation notice", async () => {
+		const proc = mockSpawn();
+		const promise = runDispatchTask({
+			defaultCwd: "/work",
+			index: 0,
+			task: "t",
+			cwd: undefined,
+			signal: undefined,
+			onProgress: undefined,
+		});
+
+		// Emit stderr data that exceeds the cap
+		proc.stderr.emit("data", Buffer.from("x".repeat(PER_TASK_OUTPUT_CAP + 1)));
+		proc.emit("close", 1);
+
+		const result = await promise;
+		expect(result.errorMessage).toContain(
+			"[stderr truncated: exceeded output cap]",
+		);
+	});
+
+	it("caps stdout NDJSON buffer at PER_TASK_OUTPUT_CAP with truncation notice", async () => {
+		const proc = mockSpawn();
+		const promise = runDispatchTask({
+			defaultCwd: "/work",
+			index: 0,
+			task: "t",
+			cwd: undefined,
+			signal: undefined,
+			onProgress: undefined,
+		});
+
+		// Flood stdout with non-NDJSON data that exceeds the cap
+		proc.stdout.emit("data", Buffer.from("a".repeat(PER_TASK_OUTPUT_CAP + 1)));
+
+		// Close — no valid message_end was ever parsed
+		proc.emit("close", 0);
+
+		const result = await promise;
+		expect(result.output).toBe("(no output)");
 	});
 });
