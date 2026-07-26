@@ -158,7 +158,7 @@ describe("before_agent_start trigger detection", () => {
 		expect(run?.goal).toBe("let's ultrawork this feature");
 		expect(statuses.get(STATUS_KEY)).toContain("running");
 
-		expect(result?.message).toMatchObject({ customType: ULTRAWORK_DIRECTIVE_MESSAGE_TYPE, display: false });
+		expect(result?.message).toMatchObject({ customType: ULTRAWORK_DIRECTIVE_MESSAGE_TYPE, display: true });
 		expect(result?.message?.content).toBe(buildUltraworkDirective(run as UltraWorkRun));
 	});
 

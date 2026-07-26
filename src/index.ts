@@ -25,10 +25,12 @@ import {
 } from "./ultrawork/prompt.js";
 import {
 	completeRun,
+	isTriggerDisabled,
 	markRunStuck,
 	readRun,
 	recordAutoContinueAttempt,
 	recordDispatch,
+	setTriggerDisabled,
 	stopRun,
 	triggerRun,
 	ultraworkStoreRef,
@@ -149,6 +151,29 @@ export default function (pi: ExtensionAPI): void {
 						);
 						return;
 					}
+					case "off": {
+						// Mute the keyword trigger, and quiet any run that's live right now so
+						// the current session stops auto-continuing too.
+						await setTriggerDisabled(ref, true);
+						const current = await readRun(ref);
+						const run =
+							current?.status === "running" ? await stopRun(ref) : current;
+						updateUltraworkUi(ctx, run);
+						ctx.ui.notify(
+							'UltraWork trigger disabled — "ultrawork"/"ulw" will not activate the mode. Say "/ulw on" to re-enable.',
+							"info",
+						);
+						return;
+					}
+					case "on": {
+						await setTriggerDisabled(ref, false);
+						updateUltraworkUi(ctx, await readRun(ref));
+						ctx.ui.notify(
+							'UltraWork trigger enabled — say "ultrawork" or "ulw" in a message to start it.',
+							"info",
+						);
+						return;
+					}
 					case "unknown": {
 						ctx.ui.notify(
 							`Unknown /ulw subcommand: "${command.input}"\n${ULW_USAGE}`,
@@ -180,15 +205,23 @@ export default function (pi: ExtensionAPI): void {
 
 		const ref = ultraworkStoreRef(ctx);
 		try {
+			// Kill switch: when the user has run `/ulw off`, the keyword no longer
+			// activates the mode, so they can type "ultrawork"/"ulw" freely (e.g. while
+			// developing this extension) until they re-arm it with `/ulw on`.
+			if (await isTriggerDisabled(ref)) return;
+
 			const { run, fresh } = await triggerRun(ref, event.prompt);
 			updateUltraworkUiBestEffort(ctx, run);
 			if (!fresh) return;
 
+			// Visible (unlike the hidden continuation nudges below): the user asked to
+			// actually see what gets injected when UltraWork triggers, not just infer
+			// it from the footer badge.
 			return {
 				message: {
 					customType: ULTRAWORK_DIRECTIVE_MESSAGE_TYPE,
 					content: buildUltraworkDirective(run),
-					display: false,
+					display: true,
 				},
 			};
 		} catch (error) {

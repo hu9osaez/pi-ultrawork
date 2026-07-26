@@ -5,8 +5,17 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 import { ULTRAWORK_STATUS_VALUES } from "./types.js";
-import { InvalidUltraWorkStoreError, UltraWorkNotFoundError, UnsupportedUltraWorkStoreVersionError } from "./errors.js";
-import type { DispatchSummary, UltraWorkFile, UltraWorkRun, UltraWorkStoreRef } from "./types.js";
+import {
+	InvalidUltraWorkStoreError,
+	UltraWorkNotFoundError,
+	UnsupportedUltraWorkStoreVersionError,
+} from "./errors.js";
+import type {
+	DispatchSummary,
+	UltraWorkFile,
+	UltraWorkRun,
+	UltraWorkStoreRef,
+} from "./types.js";
 import { isRecord } from "./types.js";
 import { validateGoal } from "./validation.js";
 
@@ -35,11 +44,19 @@ export type TriggerResult = {
  * Session-scoped: `<sessionDir>/extensions/ultrawork/<threadId>.json`.
  * No-session fallback: `$PI_CODING_AGENT_DIR/extensions/ultrawork/no-session/<hash(cwd)>/<threadId>.json`.
  */
-export function ultraworkStoreRef(ctx: UltraWorkStoreRefSource): UltraWorkStoreRef {
+export function ultraworkStoreRef(
+	ctx: UltraWorkStoreRefSource,
+): UltraWorkStoreRef {
 	const sessionFile = ctx.sessionManager.getSessionFile();
 	const baseDir =
 		sessionFile === undefined
-			? join(getAgentDir(), "extensions", "ultrawork", "no-session", cwdStoreKey(ctx.cwd))
+			? join(
+					getAgentDir(),
+					"extensions",
+					"ultrawork",
+					"no-session",
+					cwdStoreKey(ctx.cwd),
+				)
 			: join(ctx.sessionManager.getSessionDir(), "extensions", "ultrawork");
 
 	return {
@@ -56,22 +73,61 @@ export function runFilePath(ref: UltraWorkStoreRef): string {
 	return join(ref.baseDir, `${encodeURIComponent(ref.threadId)}.json`);
 }
 
-export async function readRun(ref: UltraWorkStoreRef): Promise<UltraWorkRun | null> {
+/** Read the whole persisted store envelope, defaulting to an empty file when none exists. */
+export async function readStore(
+	ref: UltraWorkStoreRef,
+): Promise<UltraWorkFile> {
 	const filePath = runFilePath(ref);
 	try {
 		const raw = await readFile(filePath, "utf8");
-		return parseUltraWorkFile(raw).run;
+		return parseUltraWorkFile(raw);
 	} catch (error) {
-		if (isMissingFile(error)) return null;
+		if (isMissingFile(error)) return { version: STORE_VERSION, run: null };
 		throw error;
 	}
 }
 
-export async function writeRun(ref: UltraWorkStoreRef, run: UltraWorkRun | null): Promise<void> {
+async function writeStore(
+	ref: UltraWorkStoreRef,
+	file: UltraWorkFile,
+): Promise<void> {
 	const filePath = runFilePath(ref);
 	await mkdir(dirname(filePath), { recursive: true });
-	const file: UltraWorkFile = { version: STORE_VERSION, run };
-	await writeFile(filePath, `${JSON.stringify(file, null, 2)}\n`, "utf8");
+	// Normalize: drop `triggerDisabled` when falsy so the enabled state has no key.
+	const normalized: UltraWorkFile = { version: STORE_VERSION, run: file.run };
+	if (file.triggerDisabled) normalized.triggerDisabled = true;
+	await writeFile(filePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+}
+
+export async function readRun(
+	ref: UltraWorkStoreRef,
+): Promise<UltraWorkRun | null> {
+	return (await readStore(ref)).run;
+}
+
+/** Persist a run while preserving the thread's existing `triggerDisabled` flag. */
+export async function writeRun(
+	ref: UltraWorkStoreRef,
+	run: UltraWorkRun | null,
+): Promise<void> {
+	const existing = await readStore(ref);
+	await writeStore(ref, { ...existing, run });
+}
+
+/** True when the keyword trigger is currently suppressed for this thread. */
+export async function isTriggerDisabled(
+	ref: UltraWorkStoreRef,
+): Promise<boolean> {
+	return (await readStore(ref)).triggerDisabled === true;
+}
+
+/** Set (or clear) the keyword-trigger kill switch, preserving any existing run. */
+export async function setTriggerDisabled(
+	ref: UltraWorkStoreRef,
+	disabled: boolean,
+): Promise<void> {
+	const existing = await readStore(ref);
+	await writeStore(ref, { ...existing, triggerDisabled: disabled });
 }
 
 /**
@@ -87,7 +143,10 @@ export async function writeRun(ref: UltraWorkStoreRef, run: UltraWorkRun | null)
  *   moves; `startedAt`, `dispatchCount`, and `autoContinueAttempts` are left
  *   untouched. The caller should not re-inject the directive.
  */
-export async function triggerRun(ref: UltraWorkStoreRef, promptText: string): Promise<TriggerResult> {
+export async function triggerRun(
+	ref: UltraWorkStoreRef,
+	promptText: string,
+): Promise<TriggerResult> {
 	const current = await readRun(ref);
 	const now = nowSeconds();
 
@@ -125,13 +184,20 @@ async function transitionRun(
 	current: UltraWorkRun,
 	options: {
 		isNoop?: (current: UltraWorkRun) => boolean;
-		patch: (current: UltraWorkRun, now: number) => Partial<Omit<UltraWorkRun, "updatedAt">>;
+		patch: (
+			current: UltraWorkRun,
+			now: number,
+		) => Partial<Omit<UltraWorkRun, "updatedAt">>;
 	},
 ): Promise<UltraWorkRun> {
 	if (options.isNoop?.(current)) return current;
 
 	const now = nowSeconds();
-	const next: UltraWorkRun = { ...current, ...options.patch(current, now), updatedAt: now };
+	const next: UltraWorkRun = {
+		...current,
+		...options.patch(current, now),
+		updatedAt: now,
+	};
 	await writeRun(ref, next);
 	return next;
 }
@@ -149,7 +215,10 @@ export async function stopRun(ref: UltraWorkStoreRef): Promise<UltraWorkRun> {
 }
 
 /** `ulw_complete`: transition the run to `complete` and disarm continuation. Idempotent. */
-export async function completeRun(ref: UltraWorkStoreRef, summary?: string): Promise<UltraWorkRun> {
+export async function completeRun(
+	ref: UltraWorkStoreRef,
+	summary?: string,
+): Promise<UltraWorkRun> {
 	const current = await readRun(ref);
 	if (current === null) {
 		throw new UltraWorkNotFoundError("No UltraWork run to complete.");
@@ -166,7 +235,9 @@ export async function completeRun(ref: UltraWorkStoreRef, summary?: string): Pro
 }
 
 /** Stuck-detector cap hit: transition the run to `stuck` and disarm continuation. No-ops if there is no run. */
-export async function markRunStuck(ref: UltraWorkStoreRef): Promise<UltraWorkRun | null> {
+export async function markRunStuck(
+	ref: UltraWorkStoreRef,
+): Promise<UltraWorkRun | null> {
 	const current = await readRun(ref);
 	if (current === null) return null;
 	return transitionRun(ref, current, {
@@ -176,7 +247,9 @@ export async function markRunStuck(ref: UltraWorkStoreRef): Promise<UltraWorkRun
 }
 
 /** Record that a hidden auto-continuation prompt was queued. No-ops if there is no run. */
-export async function recordAutoContinueAttempt(ref: UltraWorkStoreRef): Promise<UltraWorkRun | null> {
+export async function recordAutoContinueAttempt(
+	ref: UltraWorkStoreRef,
+): Promise<UltraWorkRun | null> {
 	const current = await readRun(ref);
 	if (current === null) return null;
 	return transitionRun(ref, current, {
@@ -189,7 +262,10 @@ export async function recordAutoContinueAttempt(ref: UltraWorkStoreRef): Promise
  * observable forward progress, so it resets the auto-continue stuck counter.
  * No-ops if the run no longer exists.
  */
-export async function recordDispatch(ref: UltraWorkStoreRef, summary: DispatchSummary): Promise<UltraWorkRun | null> {
+export async function recordDispatch(
+	ref: UltraWorkStoreRef,
+	summary: DispatchSummary,
+): Promise<UltraWorkRun | null> {
 	const current = await readRun(ref);
 	if (current === null) return null;
 	return transitionRun(ref, current, {
@@ -202,16 +278,39 @@ export async function recordDispatch(ref: UltraWorkStoreRef, summary: DispatchSu
 }
 
 function parseUltraWorkFile(raw: string): UltraWorkFile {
-	const parsed: unknown = JSON.parse(raw);
-	if (!isRecord(parsed)) throw new InvalidUltraWorkStoreError("ultrawork store must be a JSON object");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new InvalidUltraWorkStoreError(
+			`ultrawork store is not valid JSON: ${detail}`,
+		);
+	}
+	if (!isRecord(parsed))
+		throw new InvalidUltraWorkStoreError(
+			"ultrawork store must be a JSON object",
+		);
 	if (parsed["version"] !== STORE_VERSION) {
-		throw new UnsupportedUltraWorkStoreVersionError("unsupported ultrawork store version");
+		throw new UnsupportedUltraWorkStoreVersionError(
+			"unsupported ultrawork store version",
+		);
 	}
 	const run = parsed["run"];
 	if (run !== null && !isUltraWorkRun(run)) {
-		throw new InvalidUltraWorkStoreError("ultrawork store contains an invalid run");
+		throw new InvalidUltraWorkStoreError(
+			"ultrawork store contains an invalid run",
+		);
 	}
-	return { version: STORE_VERSION, run };
+	const triggerDisabled = parsed["triggerDisabled"];
+	if (triggerDisabled !== undefined && typeof triggerDisabled !== "boolean") {
+		throw new InvalidUltraWorkStoreError(
+			"ultrawork store triggerDisabled must be a boolean",
+		);
+	}
+	const file: UltraWorkFile = { version: STORE_VERSION, run };
+	if (triggerDisabled === true) file.triggerDisabled = true;
+	return file;
 }
 
 function isMissingFile(error: unknown): boolean {
@@ -219,7 +318,9 @@ function isMissingFile(error: unknown): boolean {
 }
 
 function isErrorWithCode(error: unknown): error is Error & { code: string } {
-	return error instanceof Error && "code" in error && typeof error.code === "string";
+	return (
+		error instanceof Error && "code" in error && typeof error.code === "string"
+	);
 }
 
 function isUltraWorkRun(value: unknown): value is UltraWorkRun {
@@ -234,16 +335,23 @@ function isUltraWorkRun(value: unknown): value is UltraWorkRun {
 		isNonNegativeSafeInteger(value["startedAt"]) &&
 		isNonNegativeSafeInteger(value["dispatchCount"]) &&
 		isNonNegativeSafeInteger(value["autoContinueAttempts"]) &&
-		(value["stoppedAt"] === undefined || isNonNegativeSafeInteger(value["stoppedAt"])) &&
-		(value["completedAt"] === undefined || isNonNegativeSafeInteger(value["completedAt"])) &&
-		(value["stuckAt"] === undefined || isNonNegativeSafeInteger(value["stuckAt"])) &&
-		(value["lastDispatchAt"] === undefined || isNonNegativeSafeInteger(value["lastDispatchAt"])) &&
+		(value["stoppedAt"] === undefined ||
+			isNonNegativeSafeInteger(value["stoppedAt"])) &&
+		(value["completedAt"] === undefined ||
+			isNonNegativeSafeInteger(value["completedAt"])) &&
+		(value["stuckAt"] === undefined ||
+			isNonNegativeSafeInteger(value["stuckAt"])) &&
+		(value["lastDispatchAt"] === undefined ||
+			isNonNegativeSafeInteger(value["lastDispatchAt"])) &&
 		(value["summary"] === undefined || typeof value["summary"] === "string")
 	);
 }
 
 function isUltraWorkStatus(value: unknown): value is UltraWorkRun["status"] {
-	return typeof value === "string" && (ULTRAWORK_STATUS_VALUES as readonly string[]).includes(value);
+	return (
+		typeof value === "string" &&
+		(ULTRAWORK_STATUS_VALUES as readonly string[]).includes(value)
+	);
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {

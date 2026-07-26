@@ -1,4 +1,9 @@
-export const ULTRAWORK_STATUS_VALUES = ["running", "complete", "stopped", "stuck"] as const;
+export const ULTRAWORK_STATUS_VALUES = [
+	"running",
+	"complete",
+	"stopped",
+	"stuck",
+] as const;
 
 export type UltraWorkStatus = (typeof ULTRAWORK_STATUS_VALUES)[number];
 
@@ -35,6 +40,13 @@ export type UltraWorkRun = {
 export type UltraWorkFile = {
 	version: 1;
 	run: UltraWorkRun | null;
+	/**
+	 * When true, the `ultrawork`/`ulw` keyword trigger is suppressed for this
+	 * thread even though the extension is loaded (set via `/ulw off`, cleared via
+	 * `/ulw on`). File-level rather than run-level so it persists across runs and
+	 * while no run exists. Omitted entirely when enabled to keep the file tidy.
+	 */
+	triggerDisabled?: boolean;
 };
 
 export type UltraWorkUpdate = {

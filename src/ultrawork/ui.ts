@@ -14,17 +14,33 @@ export const STATUS_KEY = "ultrawork";
  * mode's state at a glance. Only when no run has ever been triggered is the
  * status cleared.
  */
-export function updateUltraworkUi(ctx: ExtensionContext, run: UltraWorkRun | null): void {
+export function updateUltraworkUi(
+	ctx: ExtensionContext,
+	run: UltraWorkRun | null,
+): void {
 	if (!ctx.hasUI) return;
-	ctx.ui.setStatus(STATUS_KEY, run === null ? undefined : ultraworkStatusText(run));
+	ctx.ui.setStatus(
+		STATUS_KEY,
+		run === null ? undefined : ultraworkStatusText(run),
+	);
+}
+
+/** Keep goals from flooding the single-line footer status. */
+const GOAL_PREVIEW_MAX = 60;
+
+function goalPreview(goal: string): string {
+	const oneLine = goal.replace(/\s+/g, " ").trim();
+	return oneLine.length > GOAL_PREVIEW_MAX
+		? `${oneLine.slice(0, GOAL_PREVIEW_MAX - 1)}…`
+		: oneLine;
 }
 
 export function ultraworkStatusText(run: UltraWorkRun): string {
 	switch (run.status) {
 		case "running":
-			return `● UltraWork running — ${run.goal} (started ${formatElapsedSeconds(secondsSince(run.startedAt))} ago)`;
+			return `● UltraWork running — ${goalPreview(run.goal)} (started ${formatElapsedSeconds(secondsSince(run.startedAt))} ago)`;
 		case "complete":
-			return `UltraWork complete — ${run.goal}`;
+			return "UltraWork complete";
 		case "stopped":
 			return 'UltraWork stopped (say "ultrawork" to resume)';
 		case "stuck":

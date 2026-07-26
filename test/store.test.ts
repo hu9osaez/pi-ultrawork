@@ -6,11 +6,13 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
 	completeRun,
+	isTriggerDisabled,
 	markRunStuck,
 	readRun,
 	recordAutoContinueAttempt,
 	recordDispatch,
 	runFilePath,
+	setTriggerDisabled,
 	stopRun,
 	triggerRun,
 	ultraworkStoreRef,
@@ -21,13 +23,20 @@ const tempDirs: string[] = [];
 
 describe("ultrawork store", () => {
 	afterEach(async () => {
-		await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+		await Promise.all(
+			tempDirs
+				.splice(0)
+				.map((dir) => rm(dir, { recursive: true, force: true })),
+		);
 	});
 
 	describe("triggerRun", () => {
 		it("creates a fresh running run when none exists", async () => {
 			const ref = await tempStore("thread-create");
-			const { run, fresh } = await triggerRun(ref, "  ultrawork ship the extension  ");
+			const { run, fresh } = await triggerRun(
+				ref,
+				"  ultrawork ship the extension  ",
+			);
 
 			expect(fresh).toBe(true);
 			expect(run.threadId).toBe("thread-create");
@@ -35,8 +44,13 @@ describe("ultrawork store", () => {
 			expect(run.status).toBe("running");
 			expect(run.dispatchCount).toBe(0);
 			expect(run.autoContinueAttempts).toBe(0);
-			expect(await readRun(ref)).toMatchObject({ id: run.id, goal: "ultrawork ship the extension" });
-			expect(runFilePath(ref)).toContain(join("extensions", "ultrawork", "thread-create.json"));
+			expect(await readRun(ref)).toMatchObject({
+				id: run.id,
+				goal: "ultrawork ship the extension",
+			});
+			expect(runFilePath(ref)).toContain(
+				join("extensions", "ultrawork", "thread-create.json"),
+			);
 
 			const fileContents = await readFile(runFilePath(ref), "utf8");
 			expect(fileContents).toContain('"version": 1');
@@ -56,15 +70,22 @@ describe("ultrawork store", () => {
 			await recordAutoContinueAttempt(ref);
 			const beforeRetrigger = await readRun(ref);
 
-			const { run: refreshed, fresh } = await triggerRun(ref, "ultrawork a completely different message");
+			const { run: refreshed, fresh } = await triggerRun(
+				ref,
+				"ultrawork a completely different message",
+			);
 
 			expect(fresh).toBe(false);
 			expect(refreshed.id).toBe(first.id);
 			expect(refreshed.goal).toBe("ultrawork original goal");
 			expect(refreshed.startedAt).toBe(beforeRetrigger?.startedAt);
 			expect(refreshed.dispatchCount).toBe(beforeRetrigger?.dispatchCount);
-			expect(refreshed.autoContinueAttempts).toBe(beforeRetrigger?.autoContinueAttempts);
-			expect(refreshed.updatedAt).toBeGreaterThanOrEqual(beforeRetrigger?.updatedAt ?? 0);
+			expect(refreshed.autoContinueAttempts).toBe(
+				beforeRetrigger?.autoContinueAttempts,
+			);
+			expect(refreshed.updatedAt).toBeGreaterThanOrEqual(
+				beforeRetrigger?.updatedAt ?? 0,
+			);
 		});
 
 		it("creates a brand new run (fresh) when the previous run is stopped", async () => {
@@ -72,7 +93,10 @@ describe("ultrawork store", () => {
 			const { run: first } = await triggerRun(ref, "ultrawork first goal");
 			await stopRun(ref);
 
-			const { run: restarted, fresh } = await triggerRun(ref, "ultrawork new goal after stop");
+			const { run: restarted, fresh } = await triggerRun(
+				ref,
+				"ultrawork new goal after stop",
+			);
 
 			expect(fresh).toBe(true);
 			expect(restarted.id).not.toBe(first.id);
@@ -88,7 +112,10 @@ describe("ultrawork store", () => {
 			const { run: first } = await triggerRun(ref, "ultrawork first goal");
 			await completeRun(ref, "done");
 
-			const { run: restarted, fresh } = await triggerRun(ref, "ultrawork new goal after complete");
+			const { run: restarted, fresh } = await triggerRun(
+				ref,
+				"ultrawork new goal after complete",
+			);
 
 			expect(fresh).toBe(true);
 			expect(restarted.id).not.toBe(first.id);
@@ -100,7 +127,10 @@ describe("ultrawork store", () => {
 			const { run: first } = await triggerRun(ref, "ultrawork first goal");
 			await markRunStuck(ref);
 
-			const { run: restarted, fresh } = await triggerRun(ref, "ultrawork new goal after stuck");
+			const { run: restarted, fresh } = await triggerRun(
+				ref,
+				"ultrawork new goal after stuck",
+			);
 
 			expect(fresh).toBe(true);
 			expect(restarted.id).not.toBe(first.id);
@@ -110,7 +140,9 @@ describe("ultrawork store", () => {
 
 		it("rejects an empty goal", async () => {
 			const ref = await tempStore();
-			await expect(triggerRun(ref, "   ")).rejects.toThrow("UltraWork goal cannot be empty.");
+			await expect(triggerRun(ref, "   ")).rejects.toThrow(
+				"UltraWork goal cannot be empty.",
+			);
 		});
 	});
 
@@ -175,7 +207,9 @@ describe("ultrawork store", () => {
 
 		it("rejects complete when there is no run", async () => {
 			const ref = await tempStore();
-			await expect(completeRun(ref)).rejects.toThrow("No UltraWork run to complete");
+			await expect(completeRun(ref)).rejects.toThrow(
+				"No UltraWork run to complete",
+			);
 		});
 	});
 
@@ -225,11 +259,19 @@ describe("ultrawork store", () => {
 			const ref = await tempStore();
 			await triggerRun(ref, "ultrawork dispatch tracked");
 
-			const updated = await recordDispatch(ref, { taskCount: 3, succeeded: 2, failed: 1 });
+			const updated = await recordDispatch(ref, {
+				taskCount: 3,
+				succeeded: 2,
+				failed: 1,
+			});
 			expect(updated?.dispatchCount).toBe(3);
 			expect(typeof updated?.lastDispatchAt).toBe("number");
 
-			const again = await recordDispatch(ref, { taskCount: 2, succeeded: 2, failed: 0 });
+			const again = await recordDispatch(ref, {
+				taskCount: 2,
+				succeeded: 2,
+				failed: 0,
+			});
 			expect(again?.dispatchCount).toBe(5);
 		});
 
@@ -239,13 +281,57 @@ describe("ultrawork store", () => {
 			await recordAutoContinueAttempt(ref);
 			await recordAutoContinueAttempt(ref);
 
-			const updated = await recordDispatch(ref, { taskCount: 1, succeeded: 1, failed: 0 });
+			const updated = await recordDispatch(ref, {
+				taskCount: 1,
+				succeeded: 1,
+				failed: 0,
+			});
 			expect(updated?.autoContinueAttempts).toBe(0);
 		});
 
 		it("no-ops when there is no run", async () => {
 			const ref = await tempStore();
-			expect(await recordDispatch(ref, { taskCount: 1, succeeded: 1, failed: 0 })).toBeNull();
+			expect(
+				await recordDispatch(ref, { taskCount: 1, succeeded: 1, failed: 0 }),
+			).toBeNull();
+		});
+	});
+
+	describe("triggerDisabled flag", () => {
+		it("defaults to enabled (not disabled) when no store exists", async () => {
+			const ref = await tempStore("thread-flag-default");
+			expect(await isTriggerDisabled(ref)).toBe(false);
+		});
+
+		it("round-trips the disabled flag and clears it again", async () => {
+			const ref = await tempStore("thread-flag-toggle");
+			await setTriggerDisabled(ref, true);
+			expect(await isTriggerDisabled(ref)).toBe(true);
+			await setTriggerDisabled(ref, false);
+			expect(await isTriggerDisabled(ref)).toBe(false);
+		});
+
+		it("omits the flag key from the file when enabled, writes it when disabled", async () => {
+			const ref = await tempStore("thread-flag-file");
+			await setTriggerDisabled(ref, true);
+			expect(await readFile(runFilePath(ref), "utf8")).toContain(
+				'"triggerDisabled": true',
+			);
+			await setTriggerDisabled(ref, false);
+			expect(await readFile(runFilePath(ref), "utf8")).not.toContain(
+				"triggerDisabled",
+			);
+		});
+
+		it("preserves the disabled flag across an unrelated writeRun (triggerRun)", async () => {
+			const ref = await tempStore("thread-flag-preserve");
+			await setTriggerDisabled(ref, true);
+			await triggerRun(ref, "ultrawork keep the flag");
+			expect(await isTriggerDisabled(ref)).toBe(true);
+			expect(await readRun(ref)).toMatchObject({
+				goal: "ultrawork keep the flag",
+				status: "running",
+			});
 		});
 	});
 });
@@ -261,7 +347,9 @@ describe("ultraworkStoreRef", () => {
 			},
 		});
 		expect(ref.threadId).toBe("thread-abc");
-		expect(ref.baseDir).toBe(join("/home/user/.pi/agent/sessions", "extensions", "ultrawork"));
+		expect(ref.baseDir).toBe(
+			join("/home/user/.pi/agent/sessions", "extensions", "ultrawork"),
+		);
 	});
 
 	it("falls back to a cwd-keyed no-session directory when there is no session file", () => {
@@ -282,7 +370,9 @@ describe("ultraworkStoreRef", () => {
 			},
 		});
 
-		expect(refA.baseDir).toContain(join("extensions", "ultrawork", "no-session"));
+		expect(refA.baseDir).toContain(
+			join("extensions", "ultrawork", "no-session"),
+		);
 		expect(refA.baseDir).not.toBe(refB.baseDir);
 	});
 });

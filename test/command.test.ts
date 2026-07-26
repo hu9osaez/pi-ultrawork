@@ -18,11 +18,33 @@ describe("ultrawork command parsing", () => {
 		expect(parseUltraworkCommand("STOP")).toEqual({ kind: "stop" });
 	});
 
+	it("parses the off/on trigger toggle, case-insensitively", () => {
+		expect(parseUltraworkCommand("off")).toEqual({ kind: "off" });
+		expect(parseUltraworkCommand("OFF")).toEqual({ kind: "off" });
+		expect(parseUltraworkCommand("on")).toEqual({ kind: "on" });
+		expect(parseUltraworkCommand("On")).toEqual({ kind: "on" });
+	});
+
 	it("treats unrecognized verbs as unknown, including the retired start/resume verbs", () => {
-		expect(parseUltraworkCommand("start ship the release")).toEqual({ kind: "unknown", input: "start ship the release" });
-		expect(parseUltraworkCommand("resume")).toEqual({ kind: "unknown", input: "resume" });
-		expect(parseUltraworkCommand("pause")).toEqual({ kind: "unknown", input: "pause" });
-		expect(parseUltraworkCommand("clear")).toEqual({ kind: "unknown", input: "clear" });
-		expect(parseUltraworkCommand("help")).toEqual({ kind: "unknown", input: "help" });
+		expect(parseUltraworkCommand("start ship the release")).toEqual({
+			kind: "unknown",
+			input: "start ship the release",
+		});
+		expect(parseUltraworkCommand("resume")).toEqual({
+			kind: "unknown",
+			input: "resume",
+		});
+		expect(parseUltraworkCommand("pause")).toEqual({
+			kind: "unknown",
+			input: "pause",
+		});
+		expect(parseUltraworkCommand("clear")).toEqual({
+			kind: "unknown",
+			input: "clear",
+		});
+		expect(parseUltraworkCommand("help")).toEqual({
+			kind: "unknown",
+			input: "help",
+		});
 	});
 });
