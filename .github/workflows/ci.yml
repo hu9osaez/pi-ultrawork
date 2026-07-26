@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: ["20", "22"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Prepare pnpm
+        run: corepack prepare pnpm@11.6.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test (fails on stray test.only via --allowOnly=false)
+        run: pnpm exec vitest run --allowOnly=false
+
+      - name: Package smoke test
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            const fs = require('node:fs');
+            if (!fs.existsSync(pkg.pi.extensions[0])) {
+              throw new Error('declared extension entry point is missing: ' + pkg.pi.extensions[0]);
+            }
+          "
