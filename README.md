@@ -11,7 +11,7 @@ The idea in one line: **the goal lives on disk, not in the chat context — so t
 - **Trigger** — say `ultrawork` or `ulw` (as a whole word) anywhere in a message to start or re-engage the mode. No command needed.
 - **Persistent goal** — one run per session, stored as a JSON file on disk (`running` / `complete` / `stopped` / `stuck`). Because it lives outside the LLM context, it survives compaction — and a `session_compact` hook actively re-injects the mode framing on the next turn so the agent never loses the thread.
 - **Always-on mode** — `/ulw always on` runs *every* message in UltraWork, no keyword needed; `/ulw always off` reverts.
-- **Mid-run steering** — `/ulw steer <text>` injects an extra instruction into a running run (consumed on the next continuation) without restarting the flow.
+- **Mid-run steering** — `/ulw-steer <text>` injects an extra instruction into a running run without restarting it. It applies ASAP (kicks a continuation immediately if the run is idle), shows in the chat when applied, and `/ulw-steer` / `/ulw-steer clear` list and clear the queue.
 - **Footer status** — always visible while a run exists:
   - `● UltraWork running — <goal…> (started Nm ago)` (goal truncated so it never floods the bar)
   - `UltraWork complete`
@@ -74,10 +74,13 @@ That's it — no command. The mode starts, works autonomously across turns (fann
 /ulw on            # re-arm the keyword trigger
 /ulw always on     # run EVERY message in UltraWork, no keyword needed
 /ulw always off    # revert to keyword-only triggering
-/ulw steer <text>  # inject a mid-run instruction, applied on the next continuation
+
+/ulw-steer <text>  # inject a mid-run instruction (applied ASAP, shown in chat)
+/ulw-steer         # list pending steers
+/ulw-steer clear   # empty the steer queue
 ```
 
-`/ulw off` is what you want while **developing this extension** (or any repo where you type "ulw" a lot): it lets you say the trigger words freely without starting a run. `off` and `always on` are mutually exclusive — each clears the other. `/ulw always off` reverts triggering but never stops an in-flight run (that's `/ulw stop`). `/ulw steer` needs a running run; the note rides the next continuation turn exactly once.
+`/ulw off` is what you want while **developing this extension** (or any repo where you type "ulw" a lot): it lets you say the trigger words freely without starting a run. `off` and `always on` are mutually exclusive — each clears the other. `/ulw always off` reverts triggering but never stops an in-flight run (that's `/ulw stop`). `/ulw-steer` needs a running run; if the run is idle it kicks a continuation immediately, otherwise the note rides the next continuation turn exactly once.
 
 ## Agent tools
 

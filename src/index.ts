@@ -5,7 +5,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 
-import { parseUltraworkCommand, ULW_USAGE } from "./ultrawork/command.js";
+import {
+	parseSteerCommand,
+	parseUltraworkCommand,
+	STEER_USAGE,
+	ULW_USAGE,
+} from "./ultrawork/command.js";
 import {
 	AUTO_CONTINUE_CAP,
 	hasReachedAutoContinueCap,
@@ -243,28 +248,76 @@ export default function (pi: ExtensionAPI): void {
 						);
 						return;
 					}
-					case "steer": {
-						// Inject a mid-run instruction, consumed on the next continuation turn.
-						const updated = await addSteer(ref, command.text);
-						if (updated === null || updated.status !== "running") {
-							ctx.ui.notify(
-								"No running UltraWork run to steer. Start one first, then /ulw steer <text>.",
-								"warning",
-							);
-							return;
-						}
-						const queued = updated.pendingSteers?.length ?? 0;
-						ctx.ui.notify(
-							`Steer queued (${queued} pending) — applied on the next UltraWork continuation.`,
-							"info",
-						);
-						return;
-					}
 					case "unknown": {
 						ctx.ui.notify(
 							`Unknown /ulw subcommand: "${command.input}"\n${ULW_USAGE}`,
 							"warning",
 						);
+						return;
+					}
+				}
+			} catch (error) {
+				ctx.ui.notify(errorMessage(error), "error");
+			}
+		},
+	});
+
+	pi.registerCommand("ulw-steer", {
+		description:
+			"Inject a mid-run instruction into the active UltraWork run (applied ASAP). Bare lists pending steers; 'clear' empties the queue.",
+		handler: async (rawArgs, ctx) => {
+			const command = parseSteerCommand(rawArgs);
+			const ref = ultraworkStoreRef(ctx);
+			try {
+				switch (command.kind) {
+					case "list": {
+						const run = await readRun(ref);
+						const steers = run?.pendingSteers ?? [];
+						ctx.ui.notify(
+							steers.length === 0
+								? `No pending steers.\n${STEER_USAGE}`
+								: `Pending steers (${steers.length}):\n${steers.map((s, i) => `${i + 1}. ${s}`).join("\n")}`,
+							"info",
+						);
+						return;
+					}
+					case "clear": {
+						const cleared = await consumeSteers(ref);
+						ctx.ui.notify(
+							cleared.length > 0
+								? `Cleared ${cleared.length} pending steer(s).`
+								: "No pending steers to clear.",
+							"info",
+						);
+						return;
+					}
+					case "add": {
+						const updated = await addSteer(ref, command.text);
+						if (updated === null || updated.status !== "running") {
+							ctx.ui.notify(
+								"No running UltraWork run to steer. Start one first, then /ulw-steer <text>.",
+								"warning",
+							);
+							return;
+						}
+						const queued = updated.pendingSteers?.length ?? 0;
+						// Apply ASAP: if the session is idle, kick a continuation turn now so
+						// the steer lands immediately; otherwise it rides the next natural
+						// continuation once the current turn settles.
+						if (ctx.isIdle() && !ctx.hasPendingMessages()) {
+							await advanceOrStallUltrawork(pi, ctx, ref, updated, {
+								userInitiated: true,
+							});
+							ctx.ui.notify(
+								`Steer applied now (${queued} in this batch).`,
+								"info",
+							);
+						} else {
+							ctx.ui.notify(
+								`Steer queued (${queued} pending) — applies on the next continuation.`,
+								"info",
+							);
+						}
 						return;
 					}
 				}
@@ -408,6 +461,7 @@ export default function (pi: ExtensionAPI): void {
 		ctx: ExtensionContext,
 		ref: UltraWorkStoreRef,
 		run: UltraWorkRun,
+		opts?: { userInitiated?: boolean },
 	): Promise<void> {
 		// Headless modes (`-p` print, `--mode json`) have no UI and are typically
 		// single-shot: the process exits right after settling, so queuing a hidden
@@ -421,7 +475,9 @@ export default function (pi: ExtensionAPI): void {
 		// ctx.hasUI === true; "json" and "print" are both headless.
 		if (!ctx.hasUI) return;
 
-		if (hasReachedAutoContinueCap(run)) {
+		// A user-initiated steer is deliberate forward progress, not an idle retry:
+		// it is never blocked by, nor counted toward, the stuck cap.
+		if (!opts?.userInitiated && hasReachedAutoContinueCap(run)) {
 			const stuckRun = await markRunStuck(ref);
 			if (stuckRun) updateUltraworkUiBestEffort(ctx, stuckRun);
 			ctx.ui.notify(
@@ -431,23 +487,32 @@ export default function (pi: ExtensionAPI): void {
 			return;
 		}
 
-		const updated = await recordAutoContinueAttempt(ref);
-		// Drain any mid-run steers (`/ulw steer <text>`) so they ride this exact
+		const updated = opts?.userInitiated
+			? run
+			: ((await recordAutoContinueAttempt(ref)) ?? run);
+		// Drain any mid-run steers (`/ulw-steer <text>`) so they ride this exact
 		// continuation turn once, then are cleared.
 		const steers = await consumeSteers(ref);
+		// When the continuation carries steers, show it so the user sees exactly what
+		// mid-run instruction the agent received and when it was applied.
 		queueHiddenUltraworkPrompt(
 			pi,
-			buildContinuationPrompt(updated ?? run, steers),
+			buildContinuationPrompt(updated, steers),
+			steers.length > 0,
 		);
 	}
 }
 
-function queueHiddenUltraworkPrompt(pi: ExtensionAPI, content: string): void {
+function queueHiddenUltraworkPrompt(
+	pi: ExtensionAPI,
+	content: string,
+	display = false,
+): void {
 	pi.sendMessage(
 		{
 			customType: ULTRAWORK_CONTINUATION_MESSAGE_TYPE,
 			content,
-			display: false,
+			display,
 		},
 		{ triggerTurn: true, deliverAs: "followUp" },
 	);

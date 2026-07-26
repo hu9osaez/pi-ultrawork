@@ -457,28 +457,64 @@ describe("session_compact reinjection (integration)", () => {
 	});
 });
 
-describe("steer command (integration)", () => {
-	it("queues a steer on a running run", async () => {
+describe("/ulw-steer command (integration)", () => {
+	it("registers the ulw-steer command", () => {
 		const { api, commands } = createFakeApi();
 		extension(api);
-		const { ctx, ref, notifications } = await createFakeCtx();
+		expect(commands.has("ulw-steer")).toBe(true);
+	});
+
+	it("queues a steer without applying it when the agent is busy (not idle)", async () => {
+		const { api, commands, sentMessages } = createFakeApi();
+		extension(api);
+		const { ctx, ref, notifications } = await createFakeCtx({ isIdle: false });
 		await triggerRun(ref, "ultrawork ship it");
 
-		await commands
-			.get("ulw")
-			?.handler("steer use the Repository pattern", ctx);
+		await commands.get("ulw-steer")?.handler("use the Repository pattern", ctx);
 		expect((await readRun(ref))?.pendingSteers).toEqual([
 			"use the Repository pattern",
 		]);
 		expect(notifications.at(-1)?.message).toContain("Steer queued");
+		expect(sentMessages).toHaveLength(0);
+	});
+
+	it("applies a steer immediately when idle: consumes it and queues a visible continuation", async () => {
+		const { api, commands, sentMessages } = createFakeApi();
+		extension(api);
+		const { ctx, ref, notifications } = await createFakeCtx({ isIdle: true });
+		await triggerRun(ref, "ultrawork ship it");
+
+		await commands.get("ulw-steer")?.handler("prefer composition", ctx);
+
+		expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
+		expect(notifications.at(-1)?.message).toContain("Steer applied now");
+		expect(sentMessages).toHaveLength(1);
+		expect(sentMessages[0]?.message?.content).toContain("prefer composition");
+		expect(sentMessages[0]?.message?.display).toBe(true);
 	});
 
 	it("warns when there is no running run to steer", async () => {
 		const { api, commands } = createFakeApi();
 		extension(api);
 		const { ctx, notifications } = await createFakeCtx();
-		await commands.get("ulw")?.handler("steer focus on tests", ctx);
+		await commands.get("ulw-steer")?.handler("focus on tests", ctx);
 		expect(notifications.at(-1)).toMatchObject({ type: "warning" });
+	});
+
+	it("lists pending steers with bare /ulw-steer and clears them with 'clear'", async () => {
+		const { api, commands } = createFakeApi();
+		extension(api);
+		const { ctx, ref, notifications } = await createFakeCtx({ isIdle: false });
+		await triggerRun(ref, "ultrawork ship it");
+		await commands.get("ulw-steer")?.handler("first note", ctx);
+		await commands.get("ulw-steer")?.handler("second note", ctx);
+
+		await commands.get("ulw-steer")?.handler("", ctx);
+		expect(notifications.at(-1)?.message).toContain("Pending steers (2)");
+
+		await commands.get("ulw-steer")?.handler("clear", ctx);
+		expect(notifications.at(-1)?.message).toContain("Cleared 2");
+		expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
 	});
 });
 

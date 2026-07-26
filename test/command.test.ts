@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { parseUltraworkCommand } from "../src/ultrawork/command.js";
+import {
+	parseSteerCommand,
+	parseUltraworkCommand,
+} from "../src/ultrawork/command.js";
 
 describe("ultrawork command parsing", () => {
 	it("treats bare /ulw as a status request", () => {
@@ -41,22 +44,10 @@ describe("ultrawork command parsing", () => {
 		});
 	});
 
-	it("parses steer and preserves the raw text verbatim (case + spacing)", () => {
-		expect(
-			parseUltraworkCommand("steer Use the Repository pattern for DB access"),
-		).toEqual({
-			kind: "steer",
-			text: "Use the Repository pattern for DB access",
-		});
-		expect(
-			parseUltraworkCommand("STEER Keep the API BACKWARD compatible"),
-		).toEqual({
-			kind: "steer",
-			text: "Keep the API BACKWARD compatible",
-		});
-		expect(parseUltraworkCommand("steer")).toEqual({
+	it("no longer treats 'steer' as a /ulw subcommand (it moved to /ulw-steer)", () => {
+		expect(parseUltraworkCommand("steer do the thing")).toEqual({
 			kind: "unknown",
-			input: "steer",
+			input: "steer do the thing",
 		});
 	});
 
@@ -80,6 +71,37 @@ describe("ultrawork command parsing", () => {
 		expect(parseUltraworkCommand("help")).toEqual({
 			kind: "unknown",
 			input: "help",
+		});
+	});
+});
+
+describe("parseSteerCommand", () => {
+	it("treats empty input as a list request", () => {
+		expect(parseSteerCommand("")).toEqual({ kind: "list" });
+		expect(parseSteerCommand("   ")).toEqual({ kind: "list" });
+	});
+
+	it("treats a bare 'clear' (case-insensitive) as the clear subcommand", () => {
+		expect(parseSteerCommand("clear")).toEqual({ kind: "clear" });
+		expect(parseSteerCommand("CLEAR")).toEqual({ kind: "clear" });
+		expect(parseSteerCommand("  clear  ")).toEqual({ kind: "clear" });
+	});
+
+	it("treats anything else as an add with verbatim text (case + spacing)", () => {
+		expect(
+			parseSteerCommand("Use the Repository pattern for DB access"),
+		).toEqual({
+			kind: "add",
+			text: "Use the Repository pattern for DB access",
+		});
+		expect(parseSteerCommand("Keep the API BACKWARD compatible")).toEqual({
+			kind: "add",
+			text: "Keep the API BACKWARD compatible",
+		});
+		// 'clear' as part of a longer instruction is an add, not the clear command.
+		expect(parseSteerCommand("clear the cache first")).toEqual({
+			kind: "add",
+			text: "clear the cache first",
 		});
 	});
 });
