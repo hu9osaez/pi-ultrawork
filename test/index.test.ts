@@ -479,6 +479,32 @@ describe("/ulw-steer command (integration)", () => {
 		expect(sentMessages).toHaveLength(0);
 	});
 
+	it("injects queued busy-turn steers as visible goal corrections on the next continuation", async () => {
+		const { api, commands, handlers, sentMessages } = createFakeApi();
+		extension(api);
+		const { ctx, ref } = await createFakeCtx({
+			isIdle: false,
+			hasPendingMessages: false,
+		});
+		await triggerRun(ref, "ultrawork release using zember");
+
+		await commands.get("ulw-steer")?.handler("Use semver, not zember", ctx);
+		await handlers.get("agent_settled")?.({ type: "agent_settled" }, ctx);
+
+		expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
+		expect(sentMessages).toHaveLength(1);
+		expect(sentMessages[0]?.message?.display).toBe(true);
+		expect(sentMessages[0]?.message?.content).toContain(
+			"They may correct, clarify, or constrain the original goal text",
+		);
+		expect(sentMessages[0]?.message?.content).toContain(
+			"prefer the latest steer",
+		);
+		expect(sentMessages[0]?.message?.content).toContain(
+			"Use semver, not zember",
+		);
+	});
+
 	it("applies a steer immediately when idle: consumes it and queues a visible continuation", async () => {
 		const { api, commands, sentMessages } = createFakeApi();
 		extension(api);

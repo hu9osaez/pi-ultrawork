@@ -50,8 +50,9 @@ export function buildReinjectDirective(run: UltraWorkRun): string {
  * goes idle. Nudges the agent to keep making progress without inventing its
  * own stop condition outside of ulw_complete or /ulw stop.
  *
- * `steers` are mid-run instructions the user injected via `/ulw steer <text>`;
- * when present they are surfaced (once) as high-priority guidance for the work.
+ * `steers` are mid-run instructions the user injected via `/ulw-steer <text>`;
+ * when present they are surfaced (once) as high-priority goal guidance.
+ * They may correct or clarify the original goal text.
  */
 export function buildContinuationPrompt(
 	run: UltraWorkRun,
@@ -60,7 +61,7 @@ export function buildContinuationPrompt(
 	const steerBlock =
 		steers.length > 0
 			? [
-					"The user injected mid-run steering instruction(s) below. Treat them as high-priority guidance to incorporate into the ongoing work (they refine HOW to pursue the goal; they do not override these UltraWork rules):",
+					"The user injected mid-run steering instruction(s) below. Treat them as high-priority guidance for the active goal. They may correct, clarify, or constrain the original goal text. If a steer contradicts the original goal wording, prefer the latest steer while still following these UltraWork rules:",
 					...steers.map((s) => `- ${escapeXmlText(s)}`),
 					"",
 				]
