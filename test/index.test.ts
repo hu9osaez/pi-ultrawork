@@ -131,9 +131,10 @@ describe("ulw_dispatch tool execution", () => {
 
 		const updatedRun = await readRun(ref);
 		expect(updatedRun?.dispatchCount).toBe(1);
-		expect(statuses.get(STATUS_KEY)).toBe(
-			ultraworkStatusText(updatedRun as UltraWorkRun),
-		);
+		const footer = statuses.get(STATUS_KEY);
+		expect(footer).toContain("● UltraWork running — ultrawork ship it");
+		expect(footer).toContain("started ");
+		expect(footer).toContain(" ago");
 	});
 
 	it("does not touch the footer when no run exists and no live progress was shown", async () => {

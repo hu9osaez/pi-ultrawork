@@ -1,6 +1,6 @@
 {
   "name": "pi-ultrawork",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Persistent, goal-driven UltraWork mode for pi.dev — auto-continues across turns and fans sub-tasks out to child pi processes.",
   "type": "module",
   "license": "MIT",

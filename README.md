@@ -21,6 +21,128 @@ The idea in one line: **the goal lives on disk, not in the chat context — so t
 - **`ulw_dispatch` tool** — fans independent sub-tasks out to child `pi` processes (parallel with a concurrency cap, or sequential) and folds the results back in. Each child's live activity (thinking / tool calls / web search) streams into the chat as it happens, so a dispatch is no longer a black box. A depth-guard (`MAX_DISPATCH_DEPTH = 1`) stops dispatched children from spawning their own children.
 - **`ulw_complete` tool** — the model calls this once the goal is genuinely achieved; it ends the run and disarms auto-continuation. It's the only success exit — the agent can't just declare victory in prose.
 
+## Flow diagrams (ASCII)
+
+These diagrams show the three main runtime paths: the run lifecycle, compaction + steering, and `ulw_dispatch` fan-out.
+
+### 1) Run lifecycle
+
+```text
+[user sends a message]
+          |
+          v
+[keyword match? OR always-on?] -- no --> [no UltraWork action]
+          |
+         yes
+          |
+          v
+[before_agent_start]
+          |
+          v
+[triggerRun updates JSON store]
+          |
+          v
+[fresh run?] -- yes --> [show UltraWork directive in chat]
+     |                            |
+     no                           v
+     |                      [agent works on goal]
+     |                            |
+     +----------------------------+
+                                  |
+                                  v
+                           [agent_settled]
+                                  |
+                                  v
+                 [run still running + no pending messages?]
+                           |                      |
+                          no                     yes
+                           |                      |
+                           v                      v
+                 [wait for next event]   [auto-continue cap reached?]
+                                                   |            |
+                                                  yes          no
+                                                   |            |
+                                                   v            v
+                                         [mark run stuck]   [queue hidden
+                                         [notify user]       continuation]
+                                                                  |
+                                                                  v
+                                                       [next turn continues goal]
+```
+
+### 2) Compaction, steering, and control commands
+
+```text
+[existing running run]
+          |
+          v
+     [what happened?]
+      /      |       \
+     /       |        \
+    v        v         v
+[session_  [/ulw-    [/ulw stop
+ compact]   steer]    / off /
+    |        |        always on]
+    |        |              |
+    v        v              v
+[set       [idle?]     [update run /
+ pending      |         trigger state]
+ reinject]  yes/no
+    |      /      \
+    |     /        \
+    v    v          v
+[next  [consume   [store steer in
+ before_ steer      pendingSteers]
+ agent_ now]              |
+ start]   |               v
+    |      v      [consume on next continuation]
+    v   [queue visible
+[inject  continuation]
+ reinject
+ directive once]
+
+Extra command paths:
+- /ulw-steer         -> list pending steers
+- /ulw-steer clear   -> clear steer queue
+```
+
+### 3) `ulw_dispatch` fan-out
+
+```text
+[active UltraWork turn]
+          |
+          v
+   [call ulw_dispatch]
+          |
+          v
+ [spawn child pi processes]
+          |
+          v
+ [each child handles one task]
+          |
+          +-----------------------------+
+          |                             |
+          v                             v
+ [child emits NDJSON events]     [child finishes with
+          |                       structured result]
+          v                             |
+ [parent parses activity]              |
+ [thinking/tool/message]               |
+          |                             |
+          v                             v
+ [live progress streams into   [parent folds results back
+  the main chat]               into the current turn]
+                                          |
+                                          v
+                           [dispatch made forward progress?]
+                                   |                   |
+                                  yes                 no
+                                   |                   |
+                                   v                   v
+                        [reset auto-continue]   [normal continuation
+                        [attempt counter]        rules still apply]
+```
+
 ## Install
 
 UltraWork is published on npm as [`pi-ultrawork`](https://www.npmjs.com/package/pi-ultrawork). Add it to the `extensions` array in `~/.pi/agent/settings.json` using the `npm:` prefix, then restart / `reload` pi:
