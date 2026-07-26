@@ -12,14 +12,28 @@
   ],
   "keywords": [
     "pi",
+    "pi.dev",
     "pi-coding-agent",
+    "pi-extension",
     "extension",
     "ultrawork",
+    "ai-agent",
+    "coding-agent",
     "multi-agent",
     "orchestration",
+    "autonomous",
     "tui"
   ],
   "author": "Hugo Sáez",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hu9osaez/pi-ultrawork.git"
+  },
+  "homepage": "https://github.com/hu9osaez/pi-ultrawork#readme",
+  "bugs": "https://github.com/hu9osaez/pi-ultrawork/issues",
+  "engines": {
+    "node": ">=18"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"

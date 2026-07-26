@@ -1,5 +1,7 @@
 # UltraWork
 
+[![npm version](https://img.shields.io/npm/v/pi-ultrawork.svg)](https://www.npmjs.com/package/pi-ultrawork) [![license: MIT](https://img.shields.io/npm/l/pi-ultrawork.svg)](./LICENSE)
+
 A pi.dev extension. Say a keyword, get a persistent **"running" mode**: a goal that survives across turns, a visible footer status, capped hidden auto-continuation, and background multi-agent fan-out.
 
 The idea in one line: **the goal lives on disk, not in the chat context — so the agent keeps pursuing it even after context compaction.**
@@ -11,7 +13,7 @@ The idea in one line: **the goal lives on disk, not in the chat context — so t
 - **Footer status** — always visible while a run exists:
   - `● UltraWork running — <goal…> (started Nm ago)` (goal truncated so it never floods the bar)
   - `UltraWork complete`
-  - `UltraWork stopped (say "ultrawork" to resume)`
+  - `UltraWork stopped (say "ultrawork" to start again)`
   - `UltraWork stuck after 2 idle retries — say "ultrawork" again to restart`
 - **Auto-continuation** — while running, pi queues a hidden follow-up once each turn settles, nudging the agent forward. Capped at **2** unproductive attempts (reset by any completed `ulw_dispatch`) before the run is marked stuck instead of looping forever.
 - **`ulw_dispatch` tool** — fans independent sub-tasks out to child `pi` processes (parallel with a concurrency cap, or sequential) and folds the results back in. A depth-guard (`MAX_DISPATCH_DEPTH = 1`) stops dispatched children from spawning their own children.
@@ -19,24 +21,38 @@ The idea in one line: **the goal lives on disk, not in the chat context — so t
 
 ## Install
 
-UltraWork loads like any pi extension — add it to the `extensions` array in `~/.pi/agent/settings.json`. Three ways, depending on your use case:
+UltraWork is published on npm as [`pi-ultrawork`](https://www.npmjs.com/package/pi-ultrawork). Add it to the `extensions` array in `~/.pi/agent/settings.json` using the `npm:` prefix, then restart / `reload` pi:
 
 ```jsonc
 // ~/.pi/agent/settings.json
 {
   "extensions": [
-    "npm:pi-ultrawork",              // 1. published package (for real use)
-    "/abs/path/to/pi-ultrawork"      // 2. local checkout (for hacking on it)
+    "npm:pi-ultrawork"
   ]
 }
 ```
 
+That's the whole install — pi resolves and loads the published package the same way it loads its built-ins. No build step: pi transpiles the TypeScript entry on load.
+
+<details>
+<summary>Working on the extension itself?</summary>
+
+Point the extension at a local checkout instead of the published package:
+
+```jsonc
+// ~/.pi/agent/settings.json
+{ "extensions": ["/abs/path/to/pi-ultrawork"] }
+```
+
+Or load it once without touching settings:
+
 ```bash
-# 3. one-off dev load, no settings edit — transpiled on the fly
 pi -e ./src/index.ts
 ```
 
-No build step: pi loads the TypeScript entry (`src/index.ts`) directly. Restart / `reload` pi after editing `settings.json`.
+`reload` pi after editing `settings.json`.
+
+</details>
 
 ## Usage
 
@@ -69,23 +85,25 @@ See [SKILL.md](./SKILL.md) for the full model-facing usage guide.
 
 UltraWork ships as an npm package of **TypeScript source** — no build, no `dist/`. pi transpiles `src/index.ts` on load, so the published tarball just needs the source, the docs, and `package.json`.
 
-The `package.json` already declares the two things that matter:
+The `package.json` declares what pi and npm need:
 
 ```jsonc
 {
-  "pi":    { "extensions": ["./src/index.ts"] },  // entry point pi loads
-  "files": ["src", "README.md", "SKILL.md"]       // what goes in the tarball
+  "pi":    { "extensions": ["./src/index.ts"], "skills": ["./SKILL.md"] }, // what pi loads
+  "files": ["src", "README.md", "SKILL.md", "LICENSE"]                    // what ships
 }
 ```
 
-Steps:
+Steps (use **`pnpm`** — `devEngines` pins the package manager, so `npm publish` fails):
 
 ```bash
 pnpm test && pnpm typecheck        # 1. green bar before shipping
 npm version patch                  # 2. bump (patch | minor | major)
 pnpm pack --pack-destination /tmp  # 3. dry-run: inspect the tarball contents
-npm publish --access public        # 4. publish (drop --access for a private scope)
+pnpm publish --access public       # 4. publish
 ```
+
+> Note: `npm login` also trips over `devEngines` inside the repo — run it from your home dir (`cd ~ && npm login`); the token is global.
 
 Then anyone adds it to their `~/.pi/agent/settings.json`:
 
