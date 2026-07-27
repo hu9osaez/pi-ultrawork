@@ -7,3 +7,5 @@ coverage/
 .atl/
 # Local CodeGraph index
 .codegraph/
+# OpenCode workspace state
+.omo/
