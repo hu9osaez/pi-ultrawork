@@ -27,8 +27,13 @@ import { formatRunForUser, ultraworkStatusLabel } from "./ultrawork/format.js";
 import {
 	buildContinuationPrompt,
 	buildReinjectDirective,
+	buildSteerPrompt,
 	buildUltraworkDirective,
 } from "./ultrawork/prompt.js";
+import {
+	SteerChoiceComponent,
+	type SteerChoice,
+} from "./ultrawork/steer-component.js";
 import {
 	addSteer,
 	completeRun,
@@ -56,6 +61,7 @@ import {
 
 const ULTRAWORK_CONTINUATION_MESSAGE_TYPE = "pi-ultrawork-continuation";
 const ULTRAWORK_DIRECTIVE_MESSAGE_TYPE = "pi-ultrawork-directive";
+const ULTRAWORK_STEER_MESSAGE_TYPE = "pi-ultrawork-steer";
 
 /** Whole-word match for `ultrawork`/`ulw` anywhere in the prompt, case-insensitive. */
 const ULTRAWORK_TRIGGER_PATTERN = /\b(?:ultrawork|ulw)\b/i;
@@ -300,24 +306,38 @@ export default function (pi: ExtensionAPI): void {
 							);
 							return;
 						}
-						const queued = updated.pendingSteers?.length ?? 0;
-						// Apply ASAP: if the session is idle, kick a continuation turn now so
-						// the steer lands immediately; otherwise it rides the next natural
-						// continuation once the current turn settles.
-						if (ctx.isIdle() && !ctx.hasPendingMessages()) {
-							await advanceOrStallUltrawork(pi, ctx, ref, updated, {
-								userInitiated: true,
-							});
-							ctx.ui.notify(
-								`Steer applied now (${queued} in this batch).`,
-								"info",
-							);
-						} else {
-							ctx.ui.notify(
-								`Steer queued (${queued} pending) — applies on the next continuation.`,
-								"info",
-							);
-						}
+					// Mid-stream injection vs idle continuation. Two delivery paths:
+					//   • In-progress (the common steer case): send via pi's native
+					//     `deliverAs: "steer"` so the text lands after the current
+					//     turn's tool calls, before the next LLM call. This is the
+					//     first principle from @agnishc/edb-agent-steer — pi already
+					//     has a mid-stream steering primitive; use it. The disk
+					//     queue is cleared so the steer lands exactly once.
+					//   • Idle: no in-progress turn to interrupt, so kick a hidden
+					//     continuation turn now and let `advanceOrStallUltrawork`
+					//     drain the steer into `buildContinuationPrompt`. This path
+					//     works reliably now that BUG A is fixed (steers drain
+					//     before the stuck-cap check).
+					if (ctx.isIdle()) {
+						await advanceOrStallUltrawork(pi, ctx, ref, updated, {
+							userInitiated: true,
+						});
+						ctx.ui.notify("Steer applied now.", "info");
+					} else {
+						pi.sendMessage(
+							{
+								customType: ULTRAWORK_STEER_MESSAGE_TYPE,
+								content: buildSteerPrompt(command.text),
+								display: true,
+							},
+							{ deliverAs: "steer" },
+						);
+						await consumeSteers(ref);
+						ctx.ui.notify(
+							"Steer applied now (in-stream) — lands before the next LLM call.",
+							"info",
+						);
+					}
 						return;
 					}
 				}
@@ -325,6 +345,88 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify(errorMessage(error), "error");
 			}
 		},
+	});
+
+	// Mid-run steer interceptor. When the user types free text (not a slash
+	// command) while an UltraWork run is actively streaming, surface a
+	// single-keypress modal so they can pick how the message is delivered:
+	//
+	//   s — steer: deliver via pi's native `deliverAs: "steer"` so the text
+	//             lands after the current turn's tool calls, before the next
+	//             LLM call. This is the first principle from
+	//             @agnishc/edb-agent-steer — pi already has a mid-stream
+	//             steering primitive; use it instead of waiting for idle.
+	//   q — queue: append to the disk queue (existing path). Drains into the
+	//             next auto-continuation via advanceOrStallUltrawork.
+	//   d — discard: drop the message.
+	//   e — edit: pass the input through unchanged so the user can keep typing.
+	//
+	// Slash commands bypass this entirely (pi checks commands first per the
+	// input-event processing order). Re-injected messages from our own
+	// `pi.sendMessage` carry `source: "extension"` and are skipped explicitly.
+	pi.on("input", async (event, ctx) => {
+		if (event.source !== "interactive") return { action: "continue" };
+		const text = event.text ?? "";
+		if (text.trim() === "" || text.startsWith("/")) {
+			return { action: "continue" };
+		}
+		// `ctx.ui.custom` is only safe in TUI mode (per docs/extensions.md).
+		// Headless modes (`print`, `json`) have no UI surface for a modal, and
+		// `rpc` calls must not block on user input mid-event.
+		if (ctx.mode !== "tui") return { action: "continue" };
+		// Nothing to steer if the run is idle or absent: let the input reach
+		// the agent as a normal turn (it might itself be an `ultrawork` trigger).
+		if (ctx.isIdle()) return { action: "continue" };
+
+		const ref = ultraworkStoreRef(ctx);
+		const run = await readRun(ref);
+		if (run === null || run.status !== "running") {
+			return { action: "continue" };
+		}
+
+		let choice: SteerChoice | null = null;
+		try {
+			choice = await ctx.ui.custom<SteerChoice | null>((_, _theme, _kb, done) =>
+				new SteerChoiceComponent(text, (c) => done(c as SteerChoice)),
+			);
+		} catch {
+			// Stale ctx during teardown, or user dismissed the modal via Ctrl+C —
+			// pass the input through so the editor keeps the original text.
+			choice = null;
+		}
+		choice ??= "edit";
+
+		if (choice === "edit") return { action: "continue" };
+		if (choice === "discard") {
+			ctx.ui.notify("Steer input discarded.", "info");
+			return { action: "handled" };
+		}
+		if (choice === "queue") {
+			const updated = await addSteer(ref, text);
+			const queued = updated?.pendingSteers?.length ?? 0;
+			ctx.ui.notify(
+				`Steer queued (${queued} pending) — applies on the next continuation.`,
+				"info",
+			);
+			return { action: "handled" };
+		}
+		// choice === "steer": send mid-stream via pi's native steer primitive.
+		pi.sendMessage(
+			{
+				customType: ULTRAWORK_STEER_MESSAGE_TYPE,
+				content: buildSteerPrompt(text),
+				display: true,
+			},
+			{ deliverAs: "steer" },
+		);
+		// Drain anything else that landed on the disk queue so this steer and
+		// any earlier queued notes are not double-delivered on the next settle.
+		await consumeSteers(ref);
+		ctx.ui.notify(
+			"Steer applied now (in-stream) — lands before the next LLM call.",
+			"info",
+		);
+		return { action: "handled" };
 	});
 
 	// Keyword trigger: detect "ultrawork"/"ulw" in the raw prompt text of a
@@ -475,9 +577,21 @@ export default function (pi: ExtensionAPI): void {
 		// ctx.hasUI === true; "json" and "print" are both headless.
 		if (!ctx.hasUI) return;
 
-		// A user-initiated steer is deliberate forward progress, not an idle retry:
-		// it is never blocked by, nor counted toward, the stuck cap.
-		if (!opts?.userInitiated && hasReachedAutoContinueCap(run)) {
+		// Drain any mid-run steers (`/ulw-steer <text>`) FIRST. Steers are
+		// deliberate forward progress from the user and must be honored even
+		// when the auto-continue cap would otherwise block. They ride this exact
+		// continuation turn once, then are cleared.
+		const steers = await consumeSteers(ref);
+
+		// When steers are present, they count as user-initiated progress and
+		// bypass the stuck cap. The presence of steers also means we do NOT
+		// increment the auto-continue counter for this turn.
+		const hasSteers = steers.length > 0;
+		const isUserInitiated = opts?.userInitiated || hasSteers;
+
+		// The stuck cap only blocks idle auto-continuation attempts, not
+		// user-initiated steers or continuation triggered by a steer.
+		if (!isUserInitiated && hasReachedAutoContinueCap(run)) {
 			const stuckRun = await markRunStuck(ref);
 			if (stuckRun) updateUltraworkUiBestEffort(ctx, stuckRun);
 			ctx.ui.notify(
@@ -487,18 +601,15 @@ export default function (pi: ExtensionAPI): void {
 			return;
 		}
 
-		const updated = opts?.userInitiated
+		const updated = isUserInitiated
 			? run
 			: ((await recordAutoContinueAttempt(ref)) ?? run);
-		// Drain any mid-run steers (`/ulw-steer <text>`) so they ride this exact
-		// continuation turn once, then are cleared.
-		const steers = await consumeSteers(ref);
 		// When the continuation carries steers, show it so the user sees exactly what
 		// mid-run instruction the agent received and when it was applied.
 		queueHiddenUltraworkPrompt(
 			pi,
 			buildContinuationPrompt(updated, steers),
-			steers.length > 0,
+			hasSteers,
 		);
 	}
 }

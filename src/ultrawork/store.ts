@@ -256,7 +256,13 @@ export async function stopRun(ref: UltraWorkStoreRef): Promise<UltraWorkRun> {
 	}
 	return transitionRun(ref, current, {
 		isNoop: (run) => run.status === "stopped",
-		patch: (_run, now) => ({ status: "stopped", stoppedAt: now }),
+		// Clear orphaned steers: a stopped run never continues, so any pending
+		// note would otherwise leak on disk and confuse the next `/ulw-steer list`.
+		patch: (_run, now) => ({
+			status: "stopped",
+			stoppedAt: now,
+			pendingSteers: [],
+		}),
 	});
 }
 
@@ -272,9 +278,11 @@ export async function completeRun(
 	const trimmedSummary = summary?.trim();
 	return transitionRun(ref, current, {
 		isNoop: (run) => run.status === "complete",
+		// Clear orphaned steers: a completed run is done — pending notes are moot.
 		patch: (_run, now) => ({
 			status: "complete",
 			completedAt: now,
+			pendingSteers: [],
 			...(trimmedSummary ? { summary: trimmedSummary } : {}),
 		}),
 	});
@@ -288,7 +296,13 @@ export async function markRunStuck(
 	if (current === null) return null;
 	return transitionRun(ref, current, {
 		isNoop: (run) => run.status === "stuck",
-		patch: (_run, now) => ({ status: "stuck", stuckAt: now }),
+		// Clear orphaned steers: a stuck run refuses `/ulw-steer <text>` (status
+		// !== "running"), so any pending note would be unrecoverable.
+		patch: (_run, now) => ({
+			status: "stuck",
+			stuckAt: now,
+			pendingSteers: [],
+		}),
 	});
 }
 

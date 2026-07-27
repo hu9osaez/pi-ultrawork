@@ -183,6 +183,18 @@ describe("ultrawork store", () => {
 			const ref = await tempStore();
 			await expect(stopRun(ref)).rejects.toThrow("No UltraWork run to stop");
 		});
+
+		it("regression: clears orphaned pending steers on stop (BUG F)", async () => {
+			const ref = await tempStore();
+			await triggerRun(ref, "ultrawork ship it");
+			await addSteer(ref, "later note");
+
+			const stopped = await stopRun(ref);
+
+			expect(stopped.status).toBe("stopped");
+			expect(stopped.pendingSteers ?? []).toEqual([]);
+			expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
+		});
 	});
 
 	describe("completeRun", () => {
@@ -217,6 +229,18 @@ describe("ultrawork store", () => {
 				"No UltraWork run to complete",
 			);
 		});
+
+		it("regression: clears orphaned pending steers on complete (BUG F)", async () => {
+			const ref = await tempStore();
+			await triggerRun(ref, "ultrawork ship it");
+			await addSteer(ref, "polish the README");
+
+			const completed = await completeRun(ref, "done");
+
+			expect(completed.status).toBe("complete");
+			expect(completed.pendingSteers ?? []).toEqual([]);
+			expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
+		});
 	});
 
 	describe("markRunStuck", () => {
@@ -239,6 +263,18 @@ describe("ultrawork store", () => {
 		it("no-ops when there is no run", async () => {
 			const ref = await tempStore();
 			expect(await markRunStuck(ref)).toBeNull();
+		});
+
+		it("regression: clears orphaned pending steers on stuck transition (BUG F)", async () => {
+			const ref = await tempStore();
+			await triggerRun(ref, "ultrawork ship it");
+			await addSteer(ref, "switch to plan B");
+
+			const stuck = await markRunStuck(ref);
+
+			expect(stuck?.status).toBe("stuck");
+			expect(stuck?.pendingSteers ?? []).toEqual([]);
+			expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
 		});
 	});
 

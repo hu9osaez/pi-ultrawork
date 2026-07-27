@@ -83,6 +83,28 @@ export function buildContinuationPrompt(
 	].join("\n");
 }
 
+/**
+ * Direct mid-run steering instruction injected via `/ulw-steer <text>` while
+ * the agent is actively running. Delivered via pi's native `deliverAs: "steer"`
+ * mode, which lands the text after the current turn's tool calls, before the
+ * next LLM call — so the user's course-correction is applied mid-stream
+ * without waiting for the agent to go idle.
+ *
+ * Semantically distinct from `buildContinuationPrompt` (which is the hidden
+ * auto-continue nudge with optional steers attached): this is a focused,
+ * single-steer message routed through pi's steer pipeline. The UltraWork goal
+ * itself stays in the agent's context from prior turns — no need to repeat it.
+ */
+export function buildSteerPrompt(steer: string): string {
+	return [
+		"The user injected a mid-run steering instruction below. Treat it as high-priority guidance for the active UltraWork goal. It may correct, clarify, or constrain the original goal text. If it contradicts the original goal wording, prefer this steer while still following all UltraWork rules (including the ulw_complete success exit).",
+		"",
+		"<steer>",
+		escapeXmlText(steer.trim()),
+		"</steer>",
+	].join("\n");
+}
+
 function escapeXmlText(value: string): string {
 	return value
 		.replaceAll("&", "&amp;")

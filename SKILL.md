@@ -39,6 +39,30 @@ While a run exists, its state is always visible in the footer:
 
 While status is `running`, pi queues a hidden follow-up prompt once each turn settles (no pending retry, compaction, or queued follow-up left) nudging the agent to keep making progress on the goal. Each queued attempt counts against a cap of 2 unproductive attempts; a completed `ulw_dispatch` call resets the counter, since that is observable forward progress. Once the cap would be exceeded, the run is marked `stuck` instead of queueing again, and the user is notified once.
 
+## Mid-run Steering (`/ulw-steer`)
+
+The user can correct course mid-run with `/ulw-steer <text>`. When you receive a steer, treat it as **authoritative user guidance** — it can correct, clarify, or override the original goal wording. If a steer contradicts the goal, prefer the steer.
+
+Steers arrive in two forms:
+
+- An **in-stream steer** (`<steer>…</steer>` block) — delivered mid-turn via pi's native steer pipeline. Apply it to the work you are doing right now.
+- A **continuation steer** (prefixed "The user injected mid-run steering instruction(s) below…") — delivered at the start of an auto-continuation turn alongside the goal.
+
+Both are deliberate user actions and bypass the stuck-detector cap — the user inserting guidance is forward progress, not an idle retry. Do not argue with steers, do not ask for clarification unless they are genuinely ambiguous, and do not silently ignore them in favor of the original goal.
+
+### How the user triggers a steer
+
+- **Type free text while you are running** — pi shows a single-keypress modal:
+  - `s` — steer mid-stream (delivered before your next LLM call)
+  - `q` — queue for the next idle continuation
+  - `d` — discard
+  - `e` / Esc — keep typing/editing
+- **`/ulw-steer <text>`** — bypasses the modal, always steers mid-stream when you are running (or kicks an idle continuation if you are idle).
+- **`/ulw-steer`** (bare) — list pending queued steers.
+- **`/ulw-steer clear`** — empty the queue.
+
+The modal only appears in interactive (TUI) mode while a run is active; headless and RPC modes pass input through unchanged.
+
 ## ulw_dispatch Tool
 
 Call `ulw_dispatch` to fan independent sub-tasks out to background `pi` child processes instead of doing everything serially:

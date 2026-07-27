@@ -465,30 +465,39 @@ describe("/ulw-steer command (integration)", () => {
 		expect(commands.has("ulw-steer")).toBe(true);
 	});
 
-	it("queues a steer without applying it when the agent is busy (not idle)", async () => {
+	it("delivers a steer in-stream when the agent is busy (not idle)", async () => {
 		const { api, commands, sentMessages } = createFakeApi();
 		extension(api);
 		const { ctx, ref, notifications } = await createFakeCtx({ isIdle: false });
 		await triggerRun(ref, "ultrawork ship it");
 
 		await commands.get("ulw-steer")?.handler("use the Repository pattern", ctx);
-		expect((await readRun(ref))?.pendingSteers).toEqual([
+		expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
+		expect(notifications.at(-1)?.message).toContain("in-stream");
+		expect(sentMessages).toHaveLength(1);
+		expect(sentMessages[0]?.options).toMatchObject({ deliverAs: "steer" });
+		expect(sentMessages[0]?.message?.content).toContain(
 			"use the Repository pattern",
-		]);
-		expect(notifications.at(-1)?.message).toContain("Steer queued");
-		expect(sentMessages).toHaveLength(0);
+		);
+		expect(sentMessages[0]?.message?.display).toBe(true);
 	});
 
-	it("injects queued busy-turn steers as visible goal corrections on the next continuation", async () => {
-		const { api, commands, handlers, sentMessages } = createFakeApi();
+	it("drains queued steers on the next continuation when one was added externally before settle", async () => {
+		// Covers the disk-queue path: an external caller (e.g. a future input
+		// interceptor's "queue" option) can leave a steer on disk via addSteer,
+		// and the agent_settled → advanceOrStallUltrawork path must drain it
+		// into the visible continuation. This is also the safety net for the
+		// deprecated "queue for later" semantics.
+		const { api, handlers, sentMessages } = createFakeApi();
 		extension(api);
 		const { ctx, ref } = await createFakeCtx({
-			isIdle: false,
+			isIdle: true,
 			hasPendingMessages: false,
 		});
 		await triggerRun(ref, "ultrawork release using zember");
+		const { addSteer } = await import("../src/ultrawork/store.js");
+		await addSteer(ref, "Use semver, not zember");
 
-		await commands.get("ulw-steer")?.handler("Use semver, not zember", ctx);
 		await handlers.get("agent_settled")?.({ type: "agent_settled" }, ctx);
 
 		expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
@@ -529,12 +538,16 @@ describe("/ulw-steer command (integration)", () => {
 	});
 
 	it("lists pending steers with bare /ulw-steer and clears them with 'clear'", async () => {
+		// `/ulw-steer <text>` consumes the disk queue immediately (in-stream or
+		// idle-continuation), so we populate the queue directly via addSteer to
+		// exercise the list/clear subcommands without involving the add path.
 		const { api, commands } = createFakeApi();
 		extension(api);
 		const { ctx, ref, notifications } = await createFakeCtx({ isIdle: false });
 		await triggerRun(ref, "ultrawork ship it");
-		await commands.get("ulw-steer")?.handler("first note", ctx);
-		await commands.get("ulw-steer")?.handler("second note", ctx);
+		const { addSteer } = await import("../src/ultrawork/store.js");
+		await addSteer(ref, "first note");
+		await addSteer(ref, "second note");
 
 		await commands.get("ulw-steer")?.handler("", ctx);
 		expect(notifications.at(-1)?.message).toContain("Pending steers (2)");
@@ -588,6 +601,40 @@ describe("stuck-detector cap", () => {
 		expect(sentMessages).toHaveLength(0);
 	});
 
+	it("regression: a steer queued at the stuck-cap is consumed, not swallowed (BUG A)", async () => {
+		// BUG A: consumeSteers used to sit AFTER the stuck-cap short-circuit.
+		// A steer queued while autoContinueAttempts === AUTO_CONTINUE_CAP was
+		// silently lost: agent_settled fired → markRunStuck → return before
+		// consumeSteers. The user saw "Steer queued" but the next turn never
+		// came because the run was stuck. This test pins the fix: pending
+		// steers bypass the cap and drain into a visible continuation.
+		const { api, handlers, sentMessages } = createFakeApi();
+		extension(api);
+		const { ctx, ref } = await createFakeCtx({
+			hasPendingMessages: false,
+		});
+		await triggerRun(ref, "ultrawork keep going");
+
+		for (let i = 0; i < AUTO_CONTINUE_CAP; i++) {
+			await handlers.get("agent_settled")?.({ type: "agent_settled" }, ctx);
+		}
+		expect((await readRun(ref))?.autoContinueAttempts).toBe(AUTO_CONTINUE_CAP);
+
+		const { addSteer } = await import("../src/ultrawork/store.js");
+		await addSteer(ref, "switch to plan B");
+
+		await handlers.get("agent_settled")?.({ type: "agent_settled" }, ctx);
+
+		expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
+		expect((await readRun(ref))?.status).toBe("running");
+		expect(sentMessages).toHaveLength(AUTO_CONTINUE_CAP + 1);
+		expect(sentMessages.at(-1)?.message?.content).toContain("switch to plan B");
+		expect(sentMessages.at(-1)?.message?.content).toContain(
+			"prefer the latest steer",
+		);
+		expect(sentMessages.at(-1)?.message?.display).toBe(true);
+	});
+
 	it("resets the counter on a completed ulw_dispatch, avoiding a premature stuck transition", async () => {
 		const { api, handlers, tools, sentMessages } = createFakeApi();
 		extension(api);
@@ -620,6 +667,165 @@ describe("stuck-detector cap", () => {
 
 		expect(sentMessages).toHaveLength(1);
 		expect((await readRun(ref))?.status).toBe("running");
+	});
+});
+
+describe("input event interceptor (steer modal)", () => {
+	const dispatchInput = (
+		handlers: Map<string, FakeHandler>,
+		text: string,
+		ctx: ExtensionCommandContext,
+		source: "interactive" | "rpc" | "extension" = "interactive",
+	) =>
+		handlers
+			.get("input")
+			?.({ type: "input", text, source, images: [] }, ctx);
+
+	it("passes through when no run is active", async () => {
+		const { api, handlers, sentMessages } = createFakeApi();
+		extension(api);
+		const { ctx, customCalls } = await createFakeCtx({ isIdle: false });
+
+		const result = await dispatchInput(handlers, "use the Repository pattern", ctx);
+
+		expect(result).toEqual({ action: "continue" });
+		expect(customCalls.count).toBe(0);
+		expect(sentMessages).toHaveLength(0);
+	});
+
+	it("passes through when the agent is idle (nothing to steer)", async () => {
+		const { api, handlers } = createFakeApi();
+		extension(api);
+		const { ctx, ref, customCalls } = await createFakeCtx({ isIdle: true });
+		await triggerRun(ref, "ultrawork ship it");
+
+		const result = await dispatchInput(handlers, "use the Repository pattern", ctx);
+
+		expect(result).toEqual({ action: "continue" });
+		expect(customCalls.count).toBe(0);
+	});
+
+	it("passes through for slash commands and empty text", async () => {
+		const { api, handlers } = createFakeApi();
+		extension(api);
+		const { ctx, ref, customCalls } = await createFakeCtx({ isIdle: false });
+		await triggerRun(ref, "ultrawork ship it");
+
+		const slash = await dispatchInput(handlers, "/something", ctx);
+		const empty = await dispatchInput(handlers, "   ", ctx);
+
+		expect(slash).toEqual({ action: "continue" });
+		expect(empty).toEqual({ action: "continue" });
+		expect(customCalls.count).toBe(0);
+	});
+
+	it("passes through when source is not interactive (extension/rpc)", async () => {
+		const { api, handlers } = createFakeApi();
+		extension(api);
+		const { ctx, ref, customCalls } = await createFakeCtx({ isIdle: false });
+		await triggerRun(ref, "ultrawork ship it");
+
+		const result = await dispatchInput(
+			handlers,
+			"injected follow-up",
+			ctx,
+			"extension",
+		);
+
+		expect(result).toEqual({ action: "continue" });
+		expect(customCalls.count).toBe(0);
+	});
+
+	it("passes through in non-tui modes (no custom UI surface)", async () => {
+		const { api, handlers } = createFakeApi();
+		extension(api);
+		const { ctx, ref, customCalls } = await createFakeCtx({
+			isIdle: false,
+			mode: "json",
+		});
+		await triggerRun(ref, "ultrawork ship it");
+
+		const result = await dispatchInput(handlers, "use semver", ctx);
+
+		expect(result).toEqual({ action: "continue" });
+		expect(customCalls.count).toBe(0);
+	});
+
+	it("sends in-stream steer via deliverAs:steer when user picks 's'", async () => {
+		const { api, handlers, sentMessages } = createFakeApi();
+		extension(api);
+		const { ctx, ref, customCalls } = await createFakeCtx({
+			isIdle: false,
+			customResolver: () => Promise.resolve("steer"),
+		});
+		await triggerRun(ref, "ultrawork ship it");
+
+		const result = await dispatchInput(handlers, "use the Repository pattern", ctx);
+
+		expect(result).toEqual({ action: "handled" });
+		expect(customCalls.count).toBe(1);
+		expect(sentMessages).toHaveLength(1);
+		expect(sentMessages[0]?.options).toMatchObject({ deliverAs: "steer" });
+		expect(sentMessages[0]?.message?.content).toContain(
+			"use the Repository pattern",
+		);
+		expect(sentMessages[0]?.message?.display).toBe(true);
+		expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
+	});
+
+	it("queues to disk when user picks 'q'", async () => {
+		const { api, handlers, sentMessages } = createFakeApi();
+		extension(api);
+		const { ctx, ref, customCalls, notifications } = await createFakeCtx({
+			isIdle: false,
+			customResolver: () => Promise.resolve("queue"),
+		});
+		await triggerRun(ref, "ultrawork ship it");
+
+		const result = await dispatchInput(handlers, "switch to vitest", ctx);
+
+		expect(result).toEqual({ action: "handled" });
+		expect(customCalls.count).toBe(1);
+		expect(sentMessages).toHaveLength(0);
+		expect((await readRun(ref))?.pendingSteers ?? []).toEqual([
+			"switch to vitest",
+		]);
+		expect(notifications.at(-1)?.message).toContain("Steer queued");
+	});
+
+	it("drops the message and notifies when user picks 'd'", async () => {
+		const { api, handlers, sentMessages } = createFakeApi();
+		extension(api);
+		const { ctx, ref, customCalls, notifications } = await createFakeCtx({
+			isIdle: false,
+			customResolver: () => Promise.resolve("discard"),
+		});
+		await triggerRun(ref, "ultrawork ship it");
+
+		const result = await dispatchInput(handlers, "ignored note", ctx);
+
+		expect(result).toEqual({ action: "handled" });
+		expect(customCalls.count).toBe(1);
+		expect(sentMessages).toHaveLength(0);
+		expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
+		expect(notifications.at(-1)?.message).toContain("discarded");
+	});
+
+	it("passes the input through unchanged when user picks 'e' (edit)", async () => {
+		const { api, handlers, sentMessages } = createFakeApi();
+		extension(api);
+		const { ctx, ref, customCalls } = await createFakeCtx({
+			isIdle: false,
+			customResolver: () => Promise.resolve("edit"),
+		});
+		await triggerRun(ref, "ultrawork ship it");
+
+		const result = await dispatchInput(handlers, "half-typed ide", ctx);
+
+		expect(result).toEqual({ action: "continue" });
+		expect(customCalls.count).toBe(1);
+		expect(sentMessages).toHaveLength(0);
+		expect((await readRun(ref))?.pendingSteers ?? []).toEqual([]);
 	});
 });
 
@@ -1000,6 +1206,8 @@ async function createFakeCtx(
 		isIdle?: boolean;
 		hasPendingMessages?: boolean;
 		hasUI?: boolean;
+		mode?: "tui" | "rpc" | "json" | "print";
+		customResolver?: (choice: unknown) => Promise<unknown>;
 	} = {},
 ): Promise<{
 	ctx: ExtensionCommandContext;
@@ -1009,6 +1217,7 @@ async function createFakeCtx(
 		type?: "info" | "warning" | "error";
 	}>;
 	statuses: Map<string, string | undefined>;
+	customCalls: { count: number };
 }> {
 	const dir = await mkdtemp(join(tmpdir(), "pi-ultrawork-index-"));
 	tempDirs.push(dir);
@@ -1019,6 +1228,12 @@ async function createFakeCtx(
 		type?: "info" | "warning" | "error";
 	}> = [];
 	const statuses = new Map<string, string | undefined>();
+	// Wrapper object so destructuring at the call site keeps a live reference
+	// (a primitive would be snapshotted to 0 and never see the increment
+	// from `ctx.ui.custom` firing later).
+	const customCalls = { count: 0 };
+	const customResolver =
+		options.customResolver ?? (() => Promise.resolve("edit"));
 
 	const rawCtx = {
 		ui: {
@@ -1030,8 +1245,20 @@ async function createFakeCtx(
 			setStatus: (key: string, text: string | undefined) => {
 				statuses.set(key, text);
 			},
+			custom: async <T>(
+				_factory: (
+					tui: unknown,
+					theme: unknown,
+					keybindings: unknown,
+					done: (value: T) => void,
+				) => unknown,
+			): Promise<T> => {
+				customCalls.count += 1;
+				return (await customResolver("edit")) as T;
+			},
 		},
 		hasUI: options.hasUI ?? true,
+		mode: options.mode ?? "tui",
 		cwd: dir,
 		sessionManager: {
 			getSessionFile: () => join(dir, "session.jsonl"),
@@ -1045,5 +1272,5 @@ async function createFakeCtx(
 	const ctx = rawCtx as unknown as ExtensionCommandContext;
 	const ref = ultraworkStoreRef(ctx);
 
-	return { ctx, ref, notifications, statuses };
+	return { ctx, ref, notifications, statuses, customCalls };
 }
