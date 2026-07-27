@@ -11,7 +11,7 @@ The idea in one line: **the goal lives on disk, not in the chat context — so t
 - **Trigger** — say `ultrawork` or `ulw` (as a whole word) anywhere in a message to start or re-engage the mode. No command needed.
 - **Persistent goal** — one run per session, stored as a JSON file on disk (`running` / `complete` / `stopped` / `stuck`). Because it lives outside the LLM context, it survives compaction — and a `session_compact` hook actively re-injects the mode framing on the next turn so the agent never loses the thread.
 - **Always-on mode** — `/ulw always on` runs *every* message in UltraWork, no keyword needed; `/ulw always off` reverts.
-- **Mid-run steering** — `/ulw-steer <text>` injects an extra instruction into a running run without restarting it. It applies ASAP (kicks a continuation immediately if the run is idle), shows in the chat when applied, and `/ulw-steer` / `/ulw-steer clear` list and clear the queue.
+- **Mid-run steering** — while a run is in progress, typing free text opens a single-keypress modal: `s` steers mid-stream (lands before the next LLM call), `q` queues for the next idle continuation, `d` discards, `e`/Esc returns to the editor. `/ulw-steer <text>` bypasses the modal and steers directly. `/ulw-steer` / `/ulw-steer clear` list and clear the queue.
 - **Footer status** — always visible while a run exists:
   - `● UltraWork running — <goal…> (started Nm ago)` (goal truncated so it never floods the bar)
   - `UltraWork complete`
@@ -192,12 +192,21 @@ That's it — no command. The mode starts, works autonomously across turns (fann
 /ulw always on     # run EVERY message in UltraWork, no keyword needed
 /ulw always off    # revert to keyword-only triggering
 
-/ulw-steer <text>  # inject a mid-run instruction (applied ASAP, shown in chat)
+/ulw-steer <text>  # steer mid-stream now (bypasses the modal, shown in chat)
 /ulw-steer         # list pending steers
 /ulw-steer clear   # empty the steer queue
 ```
 
-`/ulw off` is what you want while **developing this extension** (or any repo where you type "ulw" a lot): it lets you say the trigger words freely without starting a run. `off` and `always on` are mutually exclusive — each clears the other. `/ulw always off` reverts triggering but never stops an in-flight run (that's `/ulw stop`). `/ulw-steer` needs a running run; if the run is idle it kicks a continuation immediately, otherwise the note rides the next continuation turn exactly once.
+While a run is active, typing any free text in the editor (instead of a slash command) opens a single-keypress modal:
+
+| Key | Action |
+|-----|--------|
+| `s` | Steer mid-stream — delivered before the next LLM call (uses pi's native `deliverAs: "steer"`) |
+| `q` | Queue — rides the next idle continuation via `/ulw-steer`'s disk queue |
+| `d` | Discard the message |
+| `e` / `Esc` | Return to the editor to keep typing |
+
+`/ulw off` is what you want while **developing this extension** (or any repo where you type "ulw" a lot): it lets you say the trigger words freely without starting a run. `off` and `always on` are mutually exclusive — each clears the other. `/ulw always off` reverts triggering but never stops an in-flight run (that's `/ulw stop`). The steer modal and `/ulw-steer` need a running run; the modal only appears in TUI mode (it is skipped in `print`, `json`, and `rpc` modes so headless sessions pass input through unchanged).
 
 ## Agent tools
 
